@@ -2,10 +2,12 @@
 agp = "9.2.0"
 kotlin = "2.3.20"
 gdx = "1.14.2"
+box2d = "1.14.2"
 
 [libraries]
 gdx = { group = "com.badlogicgames.gdx", name = "gdx", version.ref = "gdx" }
 gdx-backend-android = { group = "com.badlogicgames.gdx", name = "gdx-backend-android", version.ref = "gdx" }
+gdx-box2d = { group = "com.badlogicgames.gdx", name = "gdx-box2d", version.ref = "box2d" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

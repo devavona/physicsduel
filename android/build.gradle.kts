@@ -68,10 +68,15 @@ dependencies {
     implementation(libs.gdx.backend.android)
 
     val gdxVersion = libs.versions.gdx.get()
+    val box2dVersion = libs.versions.box2d.get()
     natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a")
     natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-armeabi-v7a")
     natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86")
     natives("com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-x86_64")
+    natives("com.badlogicgames.gdx:gdx-box2d-platform:$box2dVersion:natives-arm64-v8a")
+    natives("com.badlogicgames.gdx:gdx-box2d-platform:$box2dVersion:natives-armeabi-v7a")
+    natives("com.badlogicgames.gdx:gdx-box2d-platform:$box2dVersion:natives-x86")
+    natives("com.badlogicgames.gdx:gdx-box2d-platform:$box2dVersion:natives-x86_64")
 }
 
 // LibGDX ships its native (.so) code inside classifier jars (natives-<abi>.jar) rather
