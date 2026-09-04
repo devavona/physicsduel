@@ -249,6 +249,40 @@ to a direction.
     `newerSchemaVersion_isRejected` to reflect that only the "newer" 
     direction is still rejected; its behavior is unchanged.
   - ✅ **DONE** — confirmed passing on Boo's PC (`:core:test`, all 9 tests).
+- **HUD scaling audit.** `HudFont`'s font size was a raw `BitmapFont.setScale`
+  pixel multiplier (`1.4`, tuned by eye on Boo's one test device) with no
+  regard for screen density - the same "1.4x" would render at a visibly
+  different physical size on a phone with a different pixel density, even
+  on a similarly-sized screen. Fixed by multiplying by
+  `Gdx.graphics.density` (on Android this literally *is* `DisplayMetrics
+  .density`, the same value dp/sp units are defined against), the standard
+  way to get a consistent logical size across devices instead of a fixed
+  pixel count. `PlayScreen`'s HUD label margin (`16f` px) was the only other
+  raw-pixel constant in the UI - now goes through the same scaling via a new
+  `HudFont.scaled()` helper. Everything else (Menu/Pause/GameOver's text
+  positions) was already expressed as a fraction of screen width/height, so
+  it was already resolution-relative and didn't need this.
+  - `HudFont.REFERENCE_DENSITY` calibrates this - it needs to be the density
+    Boo's actual test device reports, so that device keeps rendering exactly
+    as before. Confirmed via a (now-removed) diagnostic Logcat line: Boo's
+    device (a Samsung Galaxy Fold, `SM-F971U1`) reports **density=2.625,
+    1248x1972px**. `REFERENCE_DENSITY` is set to that exact value - not a
+    placeholder anymore.
+  - Tested on-device across both of the fold's screens (cover screen closed,
+    inner screen open) - looked the same in both states, a good sign the
+    scaling itself is doing the right thing rather than nothing at all
+    (this device's two physical panels are genuinely different displays,
+    not just a resize).
+  - Text size follow-up (done): Boo asked to enlarge it. `HudFont
+    .REFERENCE_SCALE` bumped from `1.4` to `2.4` (~70% larger) - a separate,
+    deliberate size decision from the scaling-consistency fix above, not a
+    side effect of it. ✅ Confirmed on-device, looks good - no clipping
+    issues raised on either the fold's cover or inner screen.
+  - No new automated test - screen size/density scaling isn't something a
+    JVM unit test can meaningfully check (there's no real display), so this
+    one stays a visual, on-device check like Phase 7's HUD work was.
+  - ✅ **DONE** — confirmed on-device (both fold states), calibrated to
+    Boo's real device density.
 
 ## How to run the unit tests
 

@@ -187,7 +187,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
         val text = trackedBody?.let { "Y: %.2f".format(it.position.y) } ?: ""
-        HudFont.font.draw(hudBatch, text, 16f, Gdx.graphics.height - 16f)
+        val margin = HudFont.scaled(16f) // density-scaled, not a fixed pixel count - see HudFont
+        HudFont.font.draw(hudBatch, text, margin, Gdx.graphics.height - margin)
         hudBatch.end()
     }
 
