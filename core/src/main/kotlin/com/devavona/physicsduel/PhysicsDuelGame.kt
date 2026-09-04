@@ -5,6 +5,7 @@ import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.graphics.GL20
 import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.math.Vector2
+import com.badlogic.gdx.physics.box2d.Body
 import com.badlogic.gdx.physics.box2d.Box2D
 import com.badlogic.gdx.physics.box2d.Box2DDebugRenderer
 import com.badlogic.gdx.physics.box2d.BodyDef
@@ -18,12 +19,13 @@ import com.badlogic.gdx.utils.viewport.Viewport
 /**
  * Entry point shared by every platform backend (currently just Android).
  *
- * Phase 2 of the foundation build: a real Box2D world with a fixed timestep,
- * one static ground body and one dynamic circle that falls and settles on it.
- * Rendered with LibGDX's built-in debug renderer (wireframe outlines) rather
- * than sprites - the goal here is proving physics stability and the render/
- * camera pipeline, not visuals. No input, ECS, or scene management yet -
- * those are later phases layered on top without touching this class's shape.
+ * Phase 3 of the foundation build: a Box2D world with a fixed timestep, a
+ * static ground body, one dynamic circle, and finger-drag input via
+ * [DragInputProcessor]/MouseJoint. Rendered with LibGDX's built-in debug
+ * renderer (wireframe outlines) rather than sprites - the goal here is
+ * proving physics stability and the input/render/camera pipeline, not
+ * visuals. No ECS or scene management yet - those are later phases layered
+ * on top without touching this class's shape.
  */
 class PhysicsDuelGame : ApplicationAdapter() {
 
@@ -59,21 +61,36 @@ class PhysicsDuelGame : ApplicationAdapter() {
         world = World(Vector2(0f, -9.8f), true)
         debugRenderer = Box2DDebugRenderer()
 
-        createGround()
+        val floor = createBoundaries()
         createFallingCircle()
+
+        Gdx.input.inputProcessor = DragInputProcessor(world, viewport, anchorBody = floor)
     }
 
-    private fun createGround() {
-        val groundDef = BodyDef().apply {
+    /**
+     * A thin static wall around all four edges of the visible world, so a
+     * dragged (or bouncing) body stays inside the play area instead of
+     * flying off into unbounded space. Returns the floor body specifically,
+     * since it's reused as the MouseJoint's anchor body (see [DragInputProcessor]).
+     */
+    private fun createBoundaries(): Body {
+        val floor = createWall(centerX = WORLD_WIDTH / 2f, centerY = 0f, halfWidth = WORLD_WIDTH / 2f, halfHeight = 0.25f)
+        createWall(centerX = WORLD_WIDTH / 2f, centerY = WORLD_HEIGHT, halfWidth = WORLD_WIDTH / 2f, halfHeight = 0.25f) // ceiling
+        createWall(centerX = 0f, centerY = WORLD_HEIGHT / 2f, halfWidth = 0.25f, halfHeight = WORLD_HEIGHT / 2f) // left wall
+        createWall(centerX = WORLD_WIDTH, centerY = WORLD_HEIGHT / 2f, halfWidth = 0.25f, halfHeight = WORLD_HEIGHT / 2f) // right wall
+        return floor
+    }
+
+    private fun createWall(centerX: Float, centerY: Float, halfWidth: Float, halfHeight: Float): Body {
+        val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.StaticBody
-            position.set(WORLD_WIDTH / 2f, 1f)
+            position.set(centerX, centerY)
         }
-        val groundBody = world.createBody(groundDef)
-        val groundShape = PolygonShape().apply {
-            setAsBox(WORLD_WIDTH / 2f, 0.25f)
-        }
-        groundBody.createFixture(groundShape, 0f)
-        groundShape.dispose() // shapes are native-backed; always dispose after the fixture is built
+        val body = world.createBody(bodyDef)
+        val shape = PolygonShape().apply { setAsBox(halfWidth, halfHeight) }
+        body.createFixture(shape, 0f)
+        shape.dispose() // shapes are native-backed; always dispose after the fixture is built
+        return body
     }
 
     private fun createFallingCircle() {
@@ -121,7 +138,8 @@ class PhysicsDuelGame : ApplicationAdapter() {
     override fun dispose() {
         // Box2D World and the debug renderer both hold native memory - must be
         // disposed explicitly or it leaks. See PROJECT_STATE.md's "lifecycle
-        // resilience" note.
+        // resilience" note. (Joints created on the world are cleaned up
+        // automatically as part of world.dispose() - no separate handling needed.)
         world.dispose()
         debugRenderer.dispose()
     }

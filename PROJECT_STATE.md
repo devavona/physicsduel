@@ -88,10 +88,15 @@ one direction now doesn't foreclose the others.
 2. **Physics + render pipeline** — Box2D world, fixed timestep, camera/viewport,
    static ground + one falling/settling circle, debug wireframe render.
    ✅ **DONE** — confirmed on-device (circle falls, lands on ground, small
-   bounce). Committed locally; push pending as of this writing.
-3. Input pipeline — touch/drag applies force/impulse to the test shape. ← **next up**
+   bounce). Committed and pushed.
+3. **Input pipeline** — touch/drag applies force via a Box2D MouseJoint
+   (`DragInputProcessor`, reusable/generic - not hardcoded to one body).
+   Also added static boundary walls (left/right/top, floor repositioned to
+   the true bottom edge) once initial testing showed a dragged body could be
+   flung off into unbounded space with nothing to stop it. ✅ **DONE** —
+   confirmed on-device (drag works, body stays contained by the walls).
 4. ECS refactor (Ashley) — test shape becomes an entity built from components,
-   driven by systems.
+   driven by systems. ← **next up**
 5. Scene/state manager — menu → play → pause → game-over as real stub screens.
 6. Persistence layer — local save/load, corruption-safe reads.
 7. HUD/UI overlay + audio hooks, wired into the scene manager.
