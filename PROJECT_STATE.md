@@ -63,6 +63,17 @@ one direction now doesn't foreclose the others.
   compile classpath — compile failed with "class file for
   com.badlogic.gdx.Application not found". Fix: changed to `api(libs.gdx)`,
   matching how LibGDX's own official templates declare it.
+- **Unit test setup**: the first run of the new `core` tests failed all 8
+  instantly with `SharedLibraryLoadRuntimeException: Couldn't load shared
+  library 'gdx64.dll'`, thrown from `HeadlessApplication`'s constructor
+  before any test code ran. Root cause: `core/build.gradle.kts` only added
+  `gdx-box2d-platform:natives-desktop` as a test dependency, not
+  `gdx-platform:natives-desktop` — LibGDX's own base native library (which
+  `HeadlessApplication` needs regardless of Box2D) was never on the test
+  classpath. Fix: added `gdx-platform:natives-desktop` alongside it. Same
+  "each natives classifier is a separate, explicit dependency" lesson
+  `android/build.gradle.kts` already encodes for the Android ABIs — worth
+  remembering if `core`'s test dependencies change again.
 
 ## Known risks to verify, not yet resolved
 
@@ -163,9 +174,66 @@ per the original "don't back myself into a corner" goal.
 **Next up: not yet decided.** There's no Phase 8 defined — that's a real
 decision Boo should make, not something to assume. Options include: pick
 one specific game mechanic/direction to build as the first real game on
-this foundation, or keep hardening the plumbing further (e.g. more ECS
-components/systems, a real font, more robust input, settings persisted via
-`GameSave`) before committing to a direction.
+this foundation, or keep hardening the plumbing further before committing
+to a direction.
+
+## Post-foundation hardening (not numbered phases — ongoing, as-needed)
+
+- **16 KB native alignment** — resolved, see "Resolved risks" above.
+- **Automated unit tests for `core`.** Since `core` is pure Kotlin/JVM (no
+  Android dependency), it can run real JUnit tests with no device/emulator —
+  a gap that stood out once Phase 7 closed: every phase so far was verified
+  by hand on-device, with zero automated regression coverage. Added:
+  - `PhysicsSystemTest` — steps a **real** Box2D `World` (not a mock, via a
+    `natives-desktop` test dependency) through `PhysicsSystem.update()` and
+    checks the resulting body velocity, since a free-falling body's velocity
+    change per full step is exactly `gravity.y * TIME_STEP`. Covers: one
+    exact-timestep update produces one step; many small deltas summing to
+    1.0s produce the same outcome as few large deltas summing to the same
+    1.0s (frame-rate independence — the actual point of a fixed-timestep
+    accumulator); a huge stalled frame (5s) is clamped to `MAX_FRAME_TIME`
+    instead of running 5 seconds of physics at once.
+  - `SaveManagerTest` — exercises the real corruption-safe read/write
+    algorithm (round-trip, corrupt-primary-falls-back-to-backup,
+    corrupt-with-no-backup-falls-back-to-defaults, mismatched schema version
+    is rejected) against scratch files in a fresh temp directory per test.
+    **Required a small refactor**: `SaveManager`'s `persist`/`load` logic
+    was pulled out into `internal fun persistTo(...)`/`loadFrom(...)` that
+    take their file targets as parameters, instead of only being reachable
+    through the singleton's lazily-cached `current` field (which loads once
+    per JVM and can't safely be reset between tests). The public API
+    (`currentRunCount()`, `recordRunEnded()`) is unchanged.
+  - `GdxTestBootstrap` (test-only) — starts a `HeadlessApplication` with
+    `updatesPerSecond = -1` (no render-loop thread) so `Gdx.app`/`Gdx.files`
+    exist during tests, and calls `Box2D.init()`. Idempotent, called from
+    every test class's `@Before`.
+  - Added to `core/build.gradle.kts` as `testImplementation` only (JUnit
+    4.13.2, `gdx-backend-headless`, and box2d's `natives-desktop` classifier
+    jar) — none of this reaches the Android APK.
+  - ✅ **DONE** — confirmed passing on Boo's PC (`:core:test`, all 8 tests,
+    `BUILD SUCCESSFUL`). One real bug found and fixed along the way — see
+    "Real bugs hit and fixed" above (missing `gdx-platform:natives-desktop`
+    test dependency). Note for next time this is run: `SerializationException`
+    stack traces printed to the console during the run are expected, not
+    failures — three tests deliberately feed in corrupted JSON to prove
+    `SaveManager` catches and recovers from it; each is immediately followed
+    by a log line confirming the fallback (backup or defaults) worked.
+    Claude's cloud sandbox still can't run these itself (Maven Central is
+    blocked by network policy there, confirmed via the proxy status
+    endpoint) - they need to keep being run from Android Studio/Gradle on
+    Boo's PC. See "How to run the unit tests" below.
+
+## How to run the unit tests
+
+1. Sync Gradle first (it needs to pull in the new test-only dependencies).
+2. In Android Studio's project panel, expand `core > src > test > kotlin >
+   com.devavona.physicsduel`. Right-click that `physicsduel` test package
+   (or either test file directly) and choose **Run 'Tests in ...'**.
+3. A "Run" panel opens at the bottom showing each test method with a
+   green check or red X. All should be green. If anything's red, send me
+   the failure text (click the failing test to see it) and I'll fix it.
+4. This never touches your phone — it runs entirely on your PC's JVM, no
+   device/emulator needed.
 
 ## How to test Phase 7 on-device
 

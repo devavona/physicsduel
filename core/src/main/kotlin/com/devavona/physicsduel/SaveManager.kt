@@ -38,7 +38,7 @@ object SaveManager {
 
     // Loaded once per process and cached; every read/write after that goes
     // through this instance so the in-memory and on-disk copies can't drift.
-    private val current: GameSave by lazy { load() }
+    private val current: GameSave by lazy { loadFrom(saveFile, backupFile) }
 
     /** Current run count, loading from disk on first access (logs the result). */
     fun currentRunCount(): Int = current.runCount
@@ -46,21 +46,32 @@ object SaveManager {
     /** Call when a run genuinely ends (not on pause) - see [PauseScreen]. */
     fun recordRunEnded() {
         current.runCount += 1
-        persist(current)
+        persistTo(current, tmpFile, saveFile, backupFile)
     }
 
-    private fun persist(data: GameSave) {
+    // --- Corruption-safe read/write algorithm, factored out so it's testable ---
+    //
+    // `current` above is a lazily-cached, process-wide singleton value - once
+    // loaded, it can't safely be reset mid test-suite, which would make every
+    // test after the first see stale state. These `internal` functions take
+    // their file targets as parameters instead of reaching for the fixed
+    // saveFile/backupFile/tmpFile fields, so tests (SaveManagerTest, in the
+    // same module) can exercise the real algorithm against disposable scratch
+    // files without touching the singleton's cache at all. Not `private` for
+    // exactly that reason.
+
+    internal fun persistTo(data: GameSave, tmp: FileHandle, primary: FileHandle, backup: FileHandle) {
         try {
-            if (saveFile.exists()) {
-                saveFile.copyTo(backupFile)
+            if (primary.exists()) {
+                primary.copyTo(backup)
             }
-            tmpFile.writeString(json.toJson(data), false)
-            val renamed = tmpFile.file().renameTo(saveFile.file())
+            tmp.writeString(json.toJson(data), false)
+            val renamed = tmp.file().renameTo(primary.file())
             if (!renamed) {
                 // renameTo can fail across filesystems/providers; fall back to a
                 // plain copy+delete so a save is never silently lost.
-                tmpFile.copyTo(saveFile)
-                tmpFile.delete()
+                tmp.copyTo(primary)
+                tmp.delete()
             }
             Gdx.app.log(TAG, "Saved: schemaVersion=${data.schemaVersion} runCount=${data.runCount}")
         } catch (e: Exception) {
@@ -68,12 +79,12 @@ object SaveManager {
         }
     }
 
-    private fun load(): GameSave {
-        readValid(saveFile)?.let {
+    internal fun loadFrom(primary: FileHandle, backup: FileHandle): GameSave {
+        readValid(primary)?.let {
             Gdx.app.log(TAG, "Loaded save: runCount=${it.runCount}")
             return it
         }
-        readValid(backupFile)?.let {
+        readValid(backup)?.let {
             Gdx.app.log(TAG, "Primary save missing/corrupt - recovered from backup: runCount=${it.runCount}")
             return it
         }

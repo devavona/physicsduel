@@ -4,12 +4,23 @@ kotlin = "2.3.20"
 gdx = "1.14.2"
 box2d = "1.14.2"
 ashley = "1.7.4"
+junit = "4.13.2"
 
 [libraries]
 gdx = { group = "com.badlogicgames.gdx", name = "gdx", version.ref = "gdx" }
 gdx-backend-android = { group = "com.badlogicgames.gdx", name = "gdx-backend-android", version.ref = "gdx" }
 gdx-box2d = { group = "com.badlogicgames.gdx", name = "gdx-box2d", version.ref = "box2d" }
 ashley = { group = "com.badlogicgames.ashley", name = "ashley", version.ref = "ashley" }
+# Test-only, core module: JUnit4 (simple, single-artifact, no platform-launcher
+# ceremony) and LibGDX's headless backend - needed so tests can touch
+# Gdx.app/Gdx.files, which normally only exist inside a running LibGDX app.
+# Box2D's natives-desktop classifier jar (also test-only, so real Box2D
+# World objects work in tests) isn't declared here - version catalog TOML
+# [libraries] entries don't support a classifier field, so it's added as a
+# plain GAV coordinate string in core/build.gradle.kts instead, the same way
+# android/build.gradle.kts already does for its own natives-<abi> jars.
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+gdx-backend-headless = { group = "com.badlogicgames.gdx", name = "gdx-backend-headless", version.ref = "gdx" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
