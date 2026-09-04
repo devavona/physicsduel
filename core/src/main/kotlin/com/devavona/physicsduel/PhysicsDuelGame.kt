@@ -1,5 +1,7 @@
 package com.devavona.physicsduel
 
+import com.badlogic.ashley.core.Engine
+import com.badlogic.ashley.core.Entity
 import com.badlogic.gdx.ApplicationAdapter
 import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.graphics.GL20
@@ -19,13 +21,13 @@ import com.badlogic.gdx.utils.viewport.Viewport
 /**
  * Entry point shared by every platform backend (currently just Android).
  *
- * Phase 3 of the foundation build: a Box2D world with a fixed timestep, a
- * static ground body, one dynamic circle, and finger-drag input via
- * [DragInputProcessor]/MouseJoint. Rendered with LibGDX's built-in debug
- * renderer (wireframe outlines) rather than sprites - the goal here is
- * proving physics stability and the input/render/camera pipeline, not
- * visuals. No ECS or scene management yet - those are later phases layered
- * on top without touching this class's shape.
+ * Phase 4 of the foundation build: the falling/draggable circle from Phases
+ * 2-3 is now a proper Ashley entity (a [PhysicsBodyComponent] +
+ * [DraggableComponent]), physics stepping lives in [PhysicsSystem], and drag
+ * hit-testing queries the ECS instead of scanning raw Box2D bodies. Same
+ * on-screen behavior as before - this phase is about proving the composition
+ * pattern works, not adding anything visible. Still debug-rendered
+ * (wireframe outlines), still no scene management - those are later phases.
  */
 class PhysicsDuelGame : ApplicationAdapter() {
 
@@ -34,22 +36,13 @@ class PhysicsDuelGame : ApplicationAdapter() {
         // a small logical world size rather than screen-pixel dimensions.
         private const val WORLD_WIDTH = 9f
         private const val WORLD_HEIGHT = 16f
-
-        // Fixed physics timestep, decoupled from render framerate. This is
-        // the single biggest lever against jitter/instability/tunneling -
-        // see PROJECT_STATE.md's "physics stability" note.
-        private const val TIME_STEP = 1f / 60f
-        private const val MAX_FRAME_TIME = 0.25f // clamps a stalled frame so the accumulator can't spiral
-        private const val VELOCITY_ITERATIONS = 6
-        private const val POSITION_ITERATIONS = 2
     }
 
     private lateinit var camera: OrthographicCamera
     private lateinit var viewport: Viewport
     private lateinit var world: World
     private lateinit var debugRenderer: Box2DDebugRenderer
-
-    private var accumulator = 0f
+    private lateinit var engine: Engine
 
     override fun create() {
         Box2D.init()
@@ -61,10 +54,19 @@ class PhysicsDuelGame : ApplicationAdapter() {
         world = World(Vector2(0f, -9.8f), true)
         debugRenderer = Box2DDebugRenderer()
 
-        val floor = createBoundaries()
-        createFallingCircle()
+        engine = Engine()
+        engine.addSystem(PhysicsSystem(world))
 
-        Gdx.input.inputProcessor = DragInputProcessor(world, viewport, anchorBody = floor)
+        val floor = createBoundaries()
+        val circleBody = createFallingCircle()
+        engine.addEntity(
+            Entity().apply {
+                add(PhysicsBodyComponent(circleBody))
+                add(DraggableComponent())
+            }
+        )
+
+        Gdx.input.inputProcessor = DragInputProcessor(engine, world, viewport, anchorBody = floor)
     }
 
     /**
@@ -72,6 +74,10 @@ class PhysicsDuelGame : ApplicationAdapter() {
      * dragged (or bouncing) body stays inside the play area instead of
      * flying off into unbounded space. Returns the floor body specifically,
      * since it's reused as the MouseJoint's anchor body (see [DragInputProcessor]).
+     *
+     * Deliberately NOT wrapped in ECS entities: static level geometry has no
+     * per-frame behavior, so there's nothing for a system to do with it -
+     * not everything needs to be an entity.
      */
     private fun createBoundaries(): Body {
         val floor = createWall(centerX = WORLD_WIDTH / 2f, centerY = 0f, halfWidth = WORLD_WIDTH / 2f, halfHeight = 0.25f)
@@ -93,7 +99,7 @@ class PhysicsDuelGame : ApplicationAdapter() {
         return body
     }
 
-    private fun createFallingCircle() {
+    private fun createFallingCircle(): Body {
         val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.DynamicBody
             position.set(WORLD_WIDTH / 2f, WORLD_HEIGHT - 2f)
@@ -108,27 +114,17 @@ class PhysicsDuelGame : ApplicationAdapter() {
         }
         body.createFixture(fixtureDef)
         shape.dispose()
+        return body
     }
 
     override fun render() {
-        stepPhysics()
+        engine.update(Gdx.graphics.deltaTime) // drives PhysicsSystem, which owns the fixed-timestep accumulator
 
         Gdx.gl.glClearColor(0.043f, 0.071f, 0.126f, 1f) // deep space navy
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
 
         camera.update()
         debugRenderer.render(world, camera.combined)
-    }
-
-    private fun stepPhysics() {
-        // Standard fixed-timestep accumulator: the world only ever advances in
-        // exact 1/60s increments, however uneven the actual frame times are.
-        val frameTime = minOf(Gdx.graphics.deltaTime, MAX_FRAME_TIME)
-        accumulator += frameTime
-        while (accumulator >= TIME_STEP) {
-            world.step(TIME_STEP, VELOCITY_ITERATIONS, POSITION_ITERATIONS)
-            accumulator -= TIME_STEP
-        }
     }
 
     override fun resize(width: Int, height: Int) {
@@ -139,7 +135,9 @@ class PhysicsDuelGame : ApplicationAdapter() {
         // Box2D World and the debug renderer both hold native memory - must be
         // disposed explicitly or it leaks. See PROJECT_STATE.md's "lifecycle
         // resilience" note. (Joints created on the world are cleaned up
-        // automatically as part of world.dispose() - no separate handling needed.)
+        // automatically as part of world.dispose() - no separate handling needed.
+        // Ashley's Engine/Entity/Component objects are plain JVM objects with
+        // no native resources, so nothing to dispose there.)
         world.dispose()
         debugRenderer.dispose()
     }

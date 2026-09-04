@@ -95,9 +95,13 @@ one direction now doesn't foreclose the others.
    the true bottom edge) once initial testing showed a dragged body could be
    flung off into unbounded space with nothing to stop it. ✅ **DONE** —
    confirmed on-device (drag works, body stays contained by the walls).
-4. ECS refactor (Ashley) — test shape becomes an entity built from components,
-   driven by systems. ← **next up**
-5. Scene/state manager — menu → play → pause → game-over as real stub screens.
+4. **ECS refactor (Ashley)** — falling circle is now an entity
+   (`PhysicsBodyComponent` + `DraggableComponent`), physics stepping moved into
+   `PhysicsSystem`, drag hit-testing queries the ECS (`Family.all(...)`)
+   instead of scanning raw Box2D bodies. ✅ **DONE** — confirmed on-device,
+   behavior unchanged from Phase 3 as expected (this phase was purely
+   structural).
+5. Scene/state manager — menu → play → pause → game-over as real stub screens. ← **next up**
 6. Persistence layer — local save/load, corruption-safe reads.
 7. HUD/UI overlay + audio hooks, wired into the scene manager.
 
