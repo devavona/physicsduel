@@ -20,6 +20,20 @@ class PhysicsDuelGame : Game() {
         // line) to happen at cold start, proving a save survives a real
         // process kill - not just a screen change within one run of the app.
         Gdx.app.log("PhysicsDuelGame", "Cold start - previous runCount=${SaveManager.currentRunCount()}")
+
+        // Phase 7: audio needs LibGDX's audio device, which doesn't exist
+        // until create() runs - can't load this at object-init time.
+        AudioManager.init()
+
         setScreen(MenuScreen(this))
+    }
+
+    override fun dispose() {
+        super.dispose() // disposes whichever Screen is currently active
+        // HudFont and AudioManager are shared singletons (see their doc
+        // comments) - not owned by any one screen, so nothing else disposes
+        // them. This is the one true "app is shutting down" hook.
+        HudFont.dispose()
+        AudioManager.dispose()
     }
 }

@@ -1,7 +1,9 @@
 package com.devavona.physicsduel
 
+import com.badlogic.ashley.core.ComponentMapper
 import com.badlogic.ashley.core.Engine
 import com.badlogic.ashley.core.Entity
+import com.badlogic.ashley.core.Family
 import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.Input
 import com.badlogic.gdx.InputAdapter
@@ -9,6 +11,7 @@ import com.badlogic.gdx.InputMultiplexer
 import com.badlogic.gdx.Screen
 import com.badlogic.gdx.graphics.GL20
 import com.badlogic.gdx.graphics.OrthographicCamera
+import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.physics.box2d.Body
 import com.badlogic.gdx.physics.box2d.Box2D
@@ -48,6 +51,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var engine: Engine
     private lateinit var dragInputProcessor: DragInputProcessor
 
+    // Phase 7 HUD: a screen-pixel (not world-unit) camera + batch, separate
+    // from [camera]/[viewport] above which stay in Box2D world units for the
+    // debug renderer. Queries the ECS each frame rather than holding a direct
+    // Body reference, so this keeps working unchanged if/when more physics
+    // bodies exist - it always finds "the entities with a physics body",
+    // not "the one demo circle" specifically.
+    private val hudCamera = OrthographicCamera()
+    private val hudBatch = SpriteBatch()
+    private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
+    private val physicsBodyFamily = Family.all(PhysicsBodyComponent::class.java).get()
+
     init {
         Box2D.init()
 
@@ -79,6 +93,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         multiplexer.addProcessor(dragInputProcessor)
         Gdx.input.inputProcessor = multiplexer
         Gdx.input.setCatchKey(Input.Keys.BACK, true) // otherwise Android treats Back as "quit app"
+        resizeHudCamera()
+    }
+
+    private fun resizeHudCamera() {
+        hudCamera.setToOrtho(false, Gdx.graphics.width.toFloat(), Gdx.graphics.height.toFloat())
     }
 
     private inner class BackKeyHandler : InputAdapter() {
@@ -147,10 +166,34 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         camera.update()
         debugRenderer.render(world, camera.combined)
+
+        renderHud()
+    }
+
+    /**
+     * A minimal live-updating overlay: the tracked body's world-space Y
+     * position, redrawn every frame from current simulation state. The
+     * actual value shown is a placeholder (no score/health exists yet) -
+     * the point of Phase 7 is proving 2D screen-space text can be drawn on
+     * top of the world-space debug view every frame without interfering
+     * with it, which is the pattern any future HUD (score, health, timer)
+     * will reuse.
+     */
+    private fun renderHud() {
+        val trackedBody = engine.getEntitiesFor(physicsBodyFamily).firstOrNull()?.let {
+            physicsBodyMapper.get(it).body
+        }
+        hudCamera.update()
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val text = trackedBody?.let { "Y: %.2f".format(it.position.y) } ?: ""
+        HudFont.font.draw(hudBatch, text, 16f, Gdx.graphics.height - 16f)
+        hudBatch.end()
     }
 
     override fun resize(width: Int, height: Int) {
         viewport.update(width, height, true)
+        resizeHudCamera()
     }
 
     override fun pause() {}
@@ -169,5 +212,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // never automatically by the Game/Screen lifecycle.
         world.dispose()
         debugRenderer.dispose()
+        hudBatch.dispose()
     }
 }

@@ -131,10 +131,58 @@ one direction now doesn't foreclose the others.
    kill + relaunch, Logcat showed the save reloaded from disk matching the
    last saved value — confirms it survives real process death, not just a
    screen change.
-7. HUD/UI overlay + audio hooks, wired into the scene manager. ← **next up**
+7. **HUD/UI overlay + audio hooks.** `HudFont` (one shared `BitmapFont`
+   singleton, built-in default font, no asset file) and `AudioManager` (loads
+   one synthesized `audio/tap.wav` cue via LibGDX's `Sound`, fails soft to
+   silence if the asset is missing) are new generic, reusable singletons,
+   disposed once at real app shutdown (`PhysicsDuelGame.dispose`). Menu,
+   Pause, and Game Over screens each got a small `OrthographicCamera` +
+   `SpriteBatch` and now draw real text (title/prompt, "RESUME"/"END RUN",
+   "GAME OVER") instead of unlabeled color zones, and every screen-transition
+   tap plays the tap sound. Menu also now displays "Runs completed: N" read
+   live from `SaveManager` — the first place Phase 6's persisted state is
+   visible on-screen instead of only in Logcat. `PlayScreen` got a small
+   always-on-top HUD label (top-left) showing the tracked body's live Y
+   position each frame, queried through the ECS family rather than a direct
+   Body reference — proving screen-space UI can be drawn over the world-space
+   debug view every frame without disturbing it, which is the pattern any
+   real future HUD (score, health, timer) reuses.
+   ✅ **DONE** — confirmed on-device (Menu/Pause/Game Over text and tap
+   sounds, runs-completed count visible on Menu, live Y-position HUD label
+   in Play all checked out).
 
-Once Phase 7 is done, `core` is a proven, tested foundation with no specific game
-built on it yet — any future mechanic becomes a module plugged into it.
+**Foundation complete.** All 7 phases are done and confirmed on-device.
+`core` is now a proven, tested foundation — Box2D physics on a fixed
+timestep, an ECS (Ashley) composition layer, generic drag/touch input,
+a scene/state manager, corruption-safe local persistence, and a basic
+HUD/audio layer — with no specific game mechanic built on top of it yet.
+Any future direction (Asteroids-style, Gravity-Wars-style, Angry-Birds-style,
+Catapult-style, or something else) becomes a module plugged into this,
+per the original "don't back myself into a corner" goal.
+
+**Next up: not yet decided.** There's no Phase 8 defined — that's a real
+decision Boo should make, not something to assume. Options include: pick
+one specific game mechanic/direction to build as the first real game on
+this foundation, or keep hardening the plumbing further (e.g. more ECS
+components/systems, a real font, more robust input, settings persisted via
+`GameSave`) before committing to a direction.
+
+## How to test Phase 7 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. **Menu**: should now show "PHYSICS DUEL" title, "Tap to Play", and
+   "Runs completed: N" (N should match whatever Phase 6 last saved/logged).
+   Tapping to start a run should play a short tap sound.
+3. **Pause** (Back from Play): the same green/red halves as before, now
+   labeled "RESUME" and "END RUN". Tapping either should play the tap sound.
+4. **Game Over** (via Pause's "END RUN"): should show "GAME OVER" / "Tap to
+   continue", with a tap sound on the transition in and on tapping to
+   continue.
+5. **In Play**: top-left corner should show a small live "Y: <number>" label
+   that updates every frame as the circle falls/settles/gets dragged - watch
+   it track the circle's motion in real time.
+6. General check: rotate/resize (if you do) shouldn't misplace any of the
+   text - it should stay correctly positioned relative to the screen edges.
 
 ## How to test Phase 6 on-device (Logcat, not visual — no HUD yet)
 
