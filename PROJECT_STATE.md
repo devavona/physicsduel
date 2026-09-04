@@ -75,6 +75,24 @@ one direction now doesn't foreclose the others.
   `android/build.gradle.kts` already encodes for the Android ABIs — worth
   remembering if `core`'s test dependencies change again.
 
+- **Gravity-well milestone, first on-device test**: the orbit didn't spiral
+  in or out, but the whole ellipse slowly rotated in place over time
+  (apsidal precession) - the closest point to the star kept drifting
+  clockwise. Root cause: `GravitySystem` (as first written) applied its
+  force once per *rendered frame*, but `PhysicsSystem`'s fixed-timestep loop
+  only steps the actual simulation a variable number of times per frame -
+  Box2D queues an applied force and clears it on the next `world.step()`,
+  so the gravitational "kick" the body received per physics tick ended up
+  depending on frame-rate timing rather than being a fixed, consistent
+  quantity per tick. Fixed by moving gravity application from a per-frame
+  Ashley system into a `beforeStep` callback `PhysicsSystem` invokes from
+  *inside* its fixed-timestep loop, immediately before each `world.step()`
+  - guaranteeing it runs exactly once per physics tick regardless of render
+  frame rate. See `PhysicsSystem`'s `beforeStep` doc comment and
+  `GravitySystem`'s class doc comment for the full writeup. Not yet
+  re-tested on-device as of this note - see the gravity-well milestone
+  section below.
+
 ## Known risks to verify, not yet resolved
 
 - Don't mix box2d 1.14.2 natives with the 3.1.1-0 box2d artifact in the same
@@ -171,11 +189,210 @@ Any future direction (Asteroids-style, Gravity-Wars-style, Angry-Birds-style,
 Catapult-style, or something else) becomes a module plugged into this,
 per the original "don't back myself into a corner" goal.
 
-**Next up: not yet decided.** There's no Phase 8 defined — that's a real
-decision Boo should make, not something to assume. Options include: pick
-one specific game mechanic/direction to build as the first real game on
-this foundation, or keep hardening the plumbing further before committing
-to a direction.
+**Next up: decided.** Boo chose the first real game direction: an orbital
+gravity-well mechanic in the spirit of the classic "gravity well" genre of
+games (see the Concept section's homage list) — evolving *this* project
+rather than starting a separate one, per the reasoning in "Reuse across
+future games" below.
+
+**Important naming constraint (Boo, explicit):** this must NOT be branded
+"Gravity Wars" or "Gravitee Wars" anywhere in code, docs, or UI — that name
+belongs to a different, already-existing app, and reusing it would be a
+naming collision, not a homage. The underlying mechanic (a central mass
+pulling another body into a curving orbit) is exactly what's wanted; only
+the proper-noun title is off-limits. Purely descriptive physics terms are
+fine and already in use (`GravitySystem`, `GravitySourceComponent`,
+`GravityAffectedComponent` — these describe the mechanic, not a game
+title). No replacement working title has been chosen yet — PROJECT_STATE.md
+and the code refer to this generically ("the gravity-well mechanic"/"the
+orbital milestone") until Boo picks one, rather than guessing at a name
+that might turn out to collide with something else too.
+
+## Reuse across future games
+
+Asked directly by Boo: when a genuinely different game gets started later,
+how would it leverage this foundation? Honest answer given at the time:
+reuse is currently theoretical — there's only ever been one project so far,
+so nothing has actually been extracted into a separate reusable library yet.
+The recommendation (which Boo then acted on by choosing the gravity-well
+direction) was to build the first real game as an evolution of *this*
+project rather than spinning up a second repo, and only split `core` into a
+genuinely standalone/reusable module once a second, sufficiently different
+game direction actually demands it — premature extraction risks guessing
+wrong about what's actually shared. Everything foundational (fixed-timestep
+`PhysicsSystem`, Ashley ECS wiring, `DragInputProcessor`, the
+`Screen`/`Game` state machine, `SaveManager`/`GameSave`, `HudFont`/
+`AudioManager`) is already written generically enough (see each class's own
+doc comment) that it should carry forward into a future second game with
+little to no change, whenever that split actually happens.
+
+## First game: orbital gravity-well milestone ✅ DONE — confirmed on-device
+
+Replaces `PlayScreen`'s original demo content (a circle falling under
+uniform gravity, bouncing inside four walls) with the first real gameplay
+direction: a static central "star" body that pulls a smaller body into a
+curving orbit, via a brand-new custom gravity system layered on top of
+Box2D (Box2D itself only provides one *uniform* gravity vector for the
+whole world — no built-in concept of one body radially pulling another,
+which every game in this genre needs).
+
+- **`GravitySourceComponent(mass)`** (new, `Components.kt`) — tags an
+  entity as a gravity source (the star). Carries its own tuning `mass`
+  value rather than reading the body's real Box2D mass, because a *static*
+  Box2D body always reports zero mass (static bodies are immovable by
+  definition) — there's no physical mass to read off it.
+- **`GravityAffectedComponent`** (new, `Components.kt`) — marker/tag:
+  entities with this get pulled toward every gravity source each frame.
+- **`GravitySystem`** (new file) — **not** an Ashley `EntitySystem` (see the
+  precession bug/fix below for why) — a plain class constructed directly
+  with the Ashley `Engine`, capturing the same kind of live `Family` query
+  any system would. Exposes a single `applyForces()` method: for every
+  affected body, sums an inverse-square force from every source
+  (`F = G * sourceMass * affectedBody.mass / r²`, direction toward the
+  source) and applies it via `Body.applyForceToCenter()`. `G` (a tuning
+  constant, not the real physical gravitational constant — meaningless at
+  Box2D's small hand-picked world-unit scale, same as Phase 2's `-9.8` was
+  already "Earth-shaped" rather than literal) is intentionally public so
+  `PlayScreen` can derive the demo body's initial orbital velocity from the
+  exact same constant instead of duplicating the number. A minimum-distance
+  clamp on the force calculation (not on the body's actual position)
+  prevents the force from blowing up toward infinity if a body ever grazes
+  very close to a source.
+- **`PhysicsSystem`** — constructor now takes an explicit `priority: Int =
+  0` parameter (passed straight to Ashley's `EntitySystem(priority)`) and
+  an optional `beforeStep: (() -> Unit)? = null` callback, invoked from
+  *inside* the fixed-timestep loop immediately before each individual
+  `world.step()` call. `PlayScreen` wires `beforeStep` to
+  `gravitySystem::applyForces`, guaranteeing gravity is computed and
+  applied exactly once per physics tick — see "Real bugs hit and fixed"
+  above for why that had to change from the original per-frame-system
+  design (apsidal precession, caught on first on-device test). Both
+  parameters default to values that make this a non-breaking change for
+  anything that doesn't care about ordering/hooks.
+- **`PlayScreen`** — `World`'s uniform gravity is now `(0, 0)` (GravitySystem
+  is the sole source of gravity going forward); the four boundary walls
+  and `createBoundaries()`/`createWall()`/`createFallingCircle()` are gone
+  entirely, replaced with `createStar()` (static body at world center,
+  tagged `GravitySourceComponent`) and `createOrbitingBody()` (dynamic
+  body placed a fixed distance to one side of the star, tagged
+  `DraggableComponent` + `GravityAffectedComponent`, launched with an
+  initial *tangential* — not zero, not straight-at-the-star — velocity
+  computed from the closed-form circular-orbit speed `v = sqrt(G *
+  starMass / r)`, so it curves into orbit instead of falling straight in).
+  The star is reused as `DragInputProcessor`'s required static anchor body
+  — the exact same "reuse an existing static body, no dedicated dummy
+  needed" trick the removed floor previously provided. The HUD's tracked
+  body now specifically queries the `GravityAffectedComponent` family
+  (the orbiting body) rather than "whichever physics body exists first",
+  so it keeps showing the body that's actually moving rather than
+  whichever entity happened to be the star.
+- **First on-device test result**: orbit curved correctly and sped up
+  noticeably near the star on each close pass — confirmed as genuinely
+  correct physics (Kepler's second law: a body sweeps out equal areas in
+  equal time, so it must move faster when closer in), not a bug. However,
+  Boo also noticed the orbit itself slowly rotating in place over many
+  passes (apsidal precession) rather than staying a clean repeating loop —
+  see "Real bugs hit and fixed" above for the diagnosis and fix (gravity's
+  force application now happens exactly once per physics tick via
+  `PhysicsSystem`'s new `beforeStep` callback, instead of once per render
+  frame).
+- **Precession fix, re-tested on-device — ✅ DONE, confirmed, with an
+  interesting wrinkle.** Boo watched across many passes: no visible
+  rotation/drift anymore, so the fixed-timestep/render-frame timing
+  mismatch was indeed the whole cause of the precession, confirming the
+  underlying gravity math was already correct. But the orbit turned out to
+  hold the *exact same* distance and speed at every point, all the time -
+  a perfect circle, not the near/far "whip around" behavior Boo had
+  originally described. That's actually mathematically correct: the
+  orbiting body's launch velocity was deliberately set to the closed-form
+  *circular*-orbit speed (`v = sqrt(G * starMass / r)`), and a circular
+  orbit by definition never varies in distance or speed. This also
+  reframes the earlier "speeds up near the star" observation (originally
+  chalked up simply to correct Kepler physics): that speed-up was actually
+  a side effect of the precession bug itself - the inconsistent per-frame
+  force was nudging the orbit off of the perfect circle it was launched
+  into, into a slightly eccentric (elliptical) shape, which is what
+  produced the visible near/far variation. Fixing the bug removed that
+  unintended eccentricity along with the precession.
+- **Elliptical orbit, deliberately re-added.** Boo wanted the dynamic
+  near/far "whip around" behavior back, but as an intentional, stable
+  design choice rather than an accidental side effect of a bug. Fix:
+  `PlayScreen` now launches the orbiting body at `ORBIT_SPEED_FACTOR`
+  (0.85) times the circular-orbit speed instead of exactly 1.0x. Launching
+  slower than circular speed (while still purely tangential) makes the
+  starting point the *farthest* point of the orbit (apoapsis) instead of
+  the only distance it ever reaches - gravity pulls it in closer than
+  `ORBIT_RADIUS` before swinging back out, producing a real ellipse with a
+  visibly closer/faster point and a visibly farther/slower point (Kepler's
+  second law, now genuinely and deliberately present), while staying a
+  closed, stable, repeating orbit - not decaying, not precessing. 0.85 was
+  chosen to keep the close approach comfortably clear of the star's own
+  radius; a much lower factor would make the ellipse thin enough for the
+  near pass to graze or hit the star. ✅ **DONE** — confirmed on-device
+  ("better" - the near/far speed and distance variation is now visible,
+  and it stays stable pass after pass, no drift or precession noted).
+- **Deliberately not modeled yet: orbital decay.** Boo asked whether the
+  satellite should be losing velocity/energy on each pass and slowly
+  sinking into the star, like some arcade gravity-well games do for
+  tension. Answered and confirmed with Boo: no drag/friction force acts
+  between the star and satellite in this simulation (Box2D friction only
+  applies during an actual collision, and the two bodies never touch), so
+  a stable non-decaying orbit is the physically correct result of a pure
+  two-body gravity field with no other forces — real orbital decay needs
+  an explicit extra loss mechanism (atmospheric drag, tidal friction, ...).
+  Boo explicitly tabled this as a **future feature** — a deliberate
+  design choice to add later (e.g. a small velocity-proportional drag
+  force), not something to build now.
+
+**Next up (not yet started, real decision for a future session):** the
+gravity-well *physics* is done and confirmed - stable elliptical orbit,
+correct speed-up near the star, no precession, no unwanted decay. There's
+no actual *game* yet, though - no player goal, no win/lose condition, no
+input beyond the existing drag-to-perturb-the-orbit debug interaction.
+Open questions to pick up next time, none decided yet: what does the
+player actually *do* (nudge the satellite into a target orbit? avoid a
+second body? survive as long as possible? something else)? Is there a
+score or objective? Does the tabled orbital-decay feature ever get added,
+and if so, as a challenge/timer mechanic? Multiple gravity sources (a
+second star/planet) instead of just one? None of this needs deciding right
+now - flagging it so the next session picks up here instead of re-deriving
+"what's next" from scratch.
+
+### How to test the gravity-well milestone on-device
+
+1. Sync Gradle, build and run as usual.
+2. **Menu → Play.** No walls should be visible anymore — the debug
+   wireframe view should show just two circles: a larger static one at the
+   center of the screen (the star) and a smaller one orbiting around it.
+3. **Watch the smaller circle for several seconds.** It should trace an
+   *elliptical* loop, not a perfect circle: clearly closer to the star and
+   visibly faster at one point of the loop, clearly farther and slower at
+   the opposite point (correct, deliberate - see "Elliptical orbit,
+   deliberately re-added" above) — not fall straight down, not fly
+   straight off-screen, not spiral directly into the star, and not graze
+   or visibly touch the star at its closest point.
+4. **Watch for precession** (still relevant with an ellipse - arguably more
+   visible than it was on a circle). Watch for 15-30+ seconds: the near
+   point and far point of the ellipse should stay in roughly the same
+   place relative to the star across many passes, not slowly rotate around
+   it. Some tiny residual drift may still be visible (no discrete
+   force-and-step simulation is perfectly exact), but it should be subtle,
+   not an obvious steady rotation.
+5. **Drag test**: touch and drag the orbiting body — it should still
+   respond to the drag (MouseJoint) exactly as before, and should resume
+   being pulled by gravity once released, likely settling into a
+   different-looking orbit than before the drag (expected — dragging
+   changes its position/velocity, which is genuinely a different orbit,
+   not a bug).
+6. **HUD check**: the top-left "Y: &lt;number&gt;" label should keep
+   updating continuously with the orbiting body's changing Y position
+   (not the star's, which never moves) — confirms the HUD is tracking the
+   right entity.
+7. If the orbit looks wrong in some other way (grazes/hits the star,
+   flies off screen, doesn't curve at all, still precesses noticeably),
+   tell me what it looked like — the tuning constants (`GravitySystem.G`,
+   `PlayScreen`'s `STAR_MASS`/`ORBIT_RADIUS`/`ORBIT_SPEED_FACTOR`) are easy
+   to adjust once I know which direction it's off in.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
