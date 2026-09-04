@@ -101,8 +101,16 @@ one direction now doesn't foreclose the others.
    instead of scanning raw Box2D bodies. ✅ **DONE** — confirmed on-device,
    behavior unchanged from Phase 3 as expected (this phase was purely
    structural).
-5. Scene/state manager — menu → play → pause → game-over as real stub screens. ← **next up**
-6. Persistence layer — local save/load, corruption-safe reads.
+5. **Scene/state manager** — split into `MenuScreen` → `PlayScreen` → `PauseScreen`
+   → `GameOverScreen` using LibGDX's built-in `Game`/`Screen` pattern.
+   `PlayScreen` is deliberately NOT disposed on pause (only on a genuine
+   "end run", triggered from `PauseScreen`'s right-hand tap zone) so the
+   physics world survives a pause/resume cycle intact - see the resilience
+   note in `PlayScreen`'s doc comment. Back button now pauses instead of
+   quitting. ✅ **DONE** — confirmed on-device, full flow tested (menu → play
+   → pause → resume-with-state-preserved → pause → end run → game over →
+   menu).
+6. Persistence layer — local save/load, corruption-safe reads. ← **next up**
 7. HUD/UI overlay + audio hooks, wired into the scene manager.
 
 Once Phase 7 is done, `core` is a proven, tested foundation with no specific game
