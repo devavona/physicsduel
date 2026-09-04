@@ -66,19 +66,19 @@ one direction now doesn't foreclose the others.
 
 ## Known risks to verify, not yet resolved
 
-- **16 KB native page-size alignment — action item, not yet done.** There are
-  open/ambiguous LibGDX GitHub issues (#7695, #7701) about `.so` files in
-  gdx-platform/gdx-box2d-platform not being aligned for Android's 16 KB page
-  size requirement on 64-bit. Not confirmed fixed in 1.14.2, and genuinely in
-  play since Phase 2 added box2d natives — every build since then ships the
-  `.so` files this risk is about. **How to check, next time Boo is in Android
-  Studio:** Build menu → Analyze APK... → pick the most recent debug APK →
-  expand `lib/arm64-v8a/` → select each `.so` file → the analyzer's bottom
-  panel reports whether it's 16 KB-aligned. No fix to apply either way yet —
-  this is a confirm-or-flag check, not a blocking issue. If any `.so` comes
-  back unaligned, flag it before this app ever targets a 16 KB-page device.
 - Don't mix box2d 1.14.2 natives with the 3.1.1-0 box2d artifact in the same
   build — duplicate/mismatched native symbols.
+
+## Resolved risks
+
+- **16 KB native page-size alignment — RESOLVED, confirmed OK.** Checked via
+  Android Studio's APK Analyzer (Build → Generate App Bundles or APKs →
+  Generate APKs → click "analyze" on the completion notification → expand
+  `lib/arm64-v8a/`). Both `libgdx.so` and `libgdx-box2d.so` show **16 KB** in
+  the Analyzer's Alignment column — LibGDX 1.14.2's natives are already
+  aligned for Android's 16 KB page-size requirement on 64-bit. The
+  open/ambiguous GitHub issues (#7695, #7701) that prompted this check don't
+  apply to this build. No action needed.
 
 ## Fixed vs. the native-android-compose template
 
