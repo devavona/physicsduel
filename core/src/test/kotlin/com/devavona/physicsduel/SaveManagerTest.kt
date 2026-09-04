@@ -83,15 +83,38 @@ class SaveManagerTest {
     }
 
     @Test
-    fun wrongSchemaVersion_isTreatedAsInvalid() {
-        val badData = GameSave().apply {
-            schemaVersion = 9999
+    fun newerSchemaVersion_isRejected() {
+        // Simulates a save written by a build newer than this one (e.g. the
+        // app was downgraded) - there's no safe way to know what a field
+        // added after this code was written means, so it must be rejected,
+        // same as a corrupt file - never guessed at.
+        val fromTheFuture = GameSave().apply {
+            schemaVersion = GameSave.CURRENT_SCHEMA_VERSION + 1
             runCount = 42
         }
-        SaveManager.persistTo(badData, tmp, primary, backup)
+        SaveManager.persistTo(fromTheFuture, tmp, primary, backup)
 
         val loaded = SaveManager.loadFrom(primary, backup)
 
-        assertEquals(0, loaded.runCount) // mismatched schema is rejected, not misread as real data
+        assertEquals(0, loaded.runCount) // rejected, not misread as real data
+    }
+
+    @Test
+    fun olderSchemaVersion_migratesForwardInsteadOfBeingDiscarded() {
+        // Simulates a save written by an actual older build: same shape
+        // GameSave has today, but missing the field(s) added since - exactly
+        // what a real v1 file looks like once parsed, since every schema
+        // change so far has been purely additive (see GameSave's "Schema
+        // history" doc comment). Hand-written because SaveManager.persistTo
+        // always writes the *current* full shape - there's no way to
+        // produce an old-shape file through it, which is the whole point of
+        // this test.
+        primary.writeString("""{"schemaVersion":1,"runCount":5}""", false)
+
+        val loaded = SaveManager.loadFrom(primary, backup)
+
+        assertEquals(5, loaded.runCount) // preserved, not discarded
+        assertEquals(0, loaded.appLaunchCount) // field didn't exist in v1 - defaults cleanly
+        assertEquals(GameSave.CURRENT_SCHEMA_VERSION, loaded.schemaVersion) // upgraded in memory
     }
 }

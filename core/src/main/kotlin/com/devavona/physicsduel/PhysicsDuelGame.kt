@@ -21,6 +21,14 @@ class PhysicsDuelGame : Game() {
         // process kill - not just a screen change within one run of the app.
         Gdx.app.log("PhysicsDuelGame", "Cold start - previous runCount=${SaveManager.currentRunCount()}")
 
+        // Real (if small) use of the schema-migration work: a genuine stat,
+        // incremented exactly once per cold start - also doubles as the
+        // concrete, always-exercised proof that an old-format save file
+        // keeps working (see GameSave's "Schema history" and SaveManager's
+        // readValid()) rather than that migration path only ever running
+        // inside a test.
+        SaveManager.recordAppLaunched()
+
         // Phase 7: audio needs LibGDX's audio device, which doesn't exist
         // until create() runs - can't load this at object-init time.
         AudioManager.init()

@@ -222,6 +222,33 @@ to a direction.
     blocked by network policy there, confirmed via the proxy status
     endpoint) - they need to keep being run from Android Studio/Gradle on
     Boo's PC. See "How to run the unit tests" below.
+- **Save-schema migration path.** Previously, any `GameSave.schemaVersion`
+  mismatch — even a harmless one — made `SaveManager` discard the whole save
+  and fall back to defaults. Now `readValid()` treats the two directions
+  differently: a save *older* than `CURRENT_SCHEMA_VERSION` is migrated
+  forward (LibGDX's reflection-based `Json` reader already leaves a field
+  that didn't exist yet at that older version at its normal Kotlin default,
+  which covers any purely additive change with zero extra code — the
+  version check just needed to stop treating "older" as "invalid"), while a
+  save *newer* than this build understands is still rejected, same as
+  before (no safe way to guess what a field added later means). Demonstrated
+  with a real version bump rather than untested scaffolding: `GameSave` is
+  now schema v2, adding `appLaunchCount` (see its "Schema history" doc
+  comment) - a genuine new stat, incremented once per cold start via
+  `SaveManager.recordAppLaunched()` (called from `PhysicsDuelGame.create()`,
+  right after the existing Phase 6 cold-start log), not just a throwaway
+  test fixture. A future rename or type change of an existing field would
+  need real per-case handling added to `readValid()`'s migration branch -
+  there's none of that yet because no schema change has needed it; the
+  comment there says exactly where it'd go.
+  - New test: `SaveManagerTest.olderSchemaVersion_migratesForwardInsteadOfBeingDiscarded`
+    (hand-writes a v1-shaped JSON file — missing `appLaunchCount` entirely —
+    and confirms it loads with `runCount` preserved, `appLaunchCount`
+    defaulted to 0, and `schemaVersion` upgraded in memory to current).
+    `wrongSchemaVersion_isTreatedAsInvalid` was renamed to
+    `newerSchemaVersion_isRejected` to reflect that only the "newer" 
+    direction is still rejected; its behavior is unchanged.
+  - ✅ **DONE** — confirmed passing on Boo's PC (`:core:test`, all 9 tests).
 
 ## How to run the unit tests
 
