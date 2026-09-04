@@ -1,0 +1,19 @@
+<!-- Placeholder launcher icon: two orbiting bodies, standing in for a real Physics Duel
+     mark until there's actual art. Swap this out whenever real branding exists. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,54m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,54m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:strokeAlpha="0.6"
+        android:pathData="M54,29c-13.8,0 -25,11.2 -25,25s11.2,25 25,25 25,-11.2 25,-25 -11.2,-25 -25,-25z" />
+</vector>

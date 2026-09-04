@@ -1,0 +1,5 @@
+<resources>
+    <!-- Standard LibGDX game theme: no title/status bar, black background behind the
+         GL surface so there's no flash-of-wrong-color before the first frame renders. -->
+    <style name="Theme.PhysicsDuel" parent="android:Theme.Black.NoTitleBar.Fullscreen" />
+</resources>
