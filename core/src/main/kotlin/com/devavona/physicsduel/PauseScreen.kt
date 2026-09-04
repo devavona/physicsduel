@@ -53,6 +53,7 @@ class PauseScreen(
         if (screenX < Gdx.graphics.width / 2) {
             game.setScreen(playScreen) // resume - same instance, world state preserved
         } else {
+            SaveManager.recordRunEnded() // Phase 6: persist before tearing anything down
             playScreen.dispose() // permanently ending this run - see PlayScreen's doc comment on why this matters
             game.setScreen(GameOverScreen(game))
         }

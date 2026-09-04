@@ -1,6 +1,7 @@
 package com.devavona.physicsduel
 
 import com.badlogic.gdx.Game
+import com.badlogic.gdx.Gdx
 
 /**
  * Entry point shared by every platform backend (currently just Android).
@@ -15,6 +16,10 @@ import com.badlogic.gdx.Game
 class PhysicsDuelGame : Game() {
 
     override fun create() {
+        // Phase 6: touching SaveManager here forces the load (and its log
+        // line) to happen at cold start, proving a save survives a real
+        // process kill - not just a screen change within one run of the app.
+        Gdx.app.log("PhysicsDuelGame", "Cold start - previous runCount=${SaveManager.currentRunCount()}")
         setScreen(MenuScreen(this))
     }
 }
