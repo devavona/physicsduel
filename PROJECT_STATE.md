@@ -439,9 +439,9 @@ are mostly new characters/weapons — variety, not a stacking multiplier).
   the dedicated section below once that's built.
 - No working title chosen yet (see the existing naming constraint above).
 - How any of this concretely attaches to the existing gravity-well `core`
-  (single star/orbit today; a roguelite run likely implies procedurally
-  varied gravity-field layouts, multiple AI-controlled bodies, etc.) —
-  not yet designed, flagging for a future session rather than guessing.
+  — **substantially resolved**, see "Core gameplay loop" below for the
+  actual decided design (character roster/classes, HP + celestial-body-mass
+  damage model, turn/movement structure, escalating level scale).
 
 ## Difficulty scoring engine (Sept 2026 session) — built, not yet tested
 
@@ -489,6 +489,237 @@ caused by adding the difficulty files above (Claude never touched that
 file). Predates this session's edits; flagging for Boo rather than
 fixing/reverting unasked - possibly a local git `autocrlf` difference
 between machines/tools.
+
+## Core gameplay loop — decided design (Sept 2026 session)
+
+This resolves "what a run is made of": a **sequence of discrete,
+won-or-lost encounters (levels)**, not one continuous evolving scene -
+but each encounter is a bigger, more populated sandbox than the last.
+
+**Level scaling.** Level 1: one star, two planets, fits on one screen, one
+character per side. As levels progress: squad size grows (2 characters per
+side by level 2, presumably more later), the field gains more stars of
+varying size, planets gain moons, and eventually exotic gravity-well types
+appear (dwarf stars, pulsars, black holes, red giants - "basically anything
+that creates a gravity well," Boo's words). Eventually the field outgrows
+one screen and needs a scrolling/zooming camera - not built yet.
+
+**Turn structure**, per character's activation: move up to a fixed step
+budget (5 as an illustrative example, not a final tuned number) to line up
+a better angle → take one shot → move up to another budget of steps to get
+into a defensive position → turn passes. Deliberately splits movement into
+a before-shot allowance and an after-shot allowance, rather than one pooled
+budget - "line up the shot" and "take cover" are two separate decisions.
+**Not yet decided:** turn order once squads have multiple characters per
+side (does each character get an individual interleaved turn, or does
+"your turn" mean your whole squad acts before the AI's squad goes?).
+
+**Aiming/attack:** pull-back-and-release, Angry-Birds-style - the pull
+vector's angle and distance sets a missile's launch angle and power, then
+gravity from nearby wells curves it in flight using the same physics
+[GravitySystem] already provides for the orbiting-body milestone. This is
+a new *input* scheme, distinct from [DragInputProcessor]'s existing
+continuous-drag MouseJoint interaction used for that milestone's demo body.
+
+**Character roster/classes** - directly the "menu" half of the
+already-decided three-layer progression model (see "Game design
+exploration" above): unlocking new classes over time via meta-progression
+IS the "new weapon options become available" layer; which unlocked
+classes you actually field on a given level is the in-run build layer.
+Roster so far, RPG-style, not final/complete:
+- **Archer** - baseline simple-missile unit.
+- **Tank** - bigger missile, more health, fewer movement steps per turn
+  (trades mobility for durability/power).
+- **Bombardier** - lobs a bomb (bigger blast/damage); limited to one shot
+  per turn.
+- **Trebuchet** - named, not yet designed/described.
+- **Sharpshooter** - a laser weapon largely unaffected by gravity; trades
+  raw power for rewarding a clean direct line of sight over a curved
+  trick shot.
+- More classes expected over time; this list is a starting point, not
+  exhaustive.
+
+**Damage model:**
+- A direct hit on an opposing character removes that character's health -
+  health lives on characters, not on celestial bodies.
+- A miss that strikes a planet/moon/asteroid instead damages that body's
+  mass/structure - a small divot from a simple missile, a much bigger
+  crater from a bomb (damage scale depends on weapon type).
+- **Collateral/splash damage:** any character near a missed impact takes
+  damage scaling with proximity (closer = more) and the weapon's power
+  (bigger bombs = bigger blast radius and damage).
+- Named strategic implications (Boo, explicit): deliberately cratering a
+  moon to expose someone hiding on its far side; using the gravity-sling
+  to curve a shot around cover instead of needing direct line of sight.
+
+**Gravity/mass model, confirmed:**
+- A celestial body's gravitational pull is a **live, mutable function of
+  its current mass** - chipping away mass through combat damage measurably
+  weakens its gravity well in real time, itself a strategic tool (per the
+  moon-cratering example above). This means [GravitySourceComponent]'s
+  `mass` - currently a fixed value set once at construction - needs to
+  become something combat damage can write into over time, instead of a
+  constant. Real but contained change, not yet made.
+- **Deliberate simplification:** ordinary planets/moons/asteroids share
+  one uniform density, so their gravity is driven purely by size - what
+  you see is what you get, avoiding a hidden/unreadable stat on the most
+  common object type.
+- **Exotic body categories keep their own density constant:** stars, red
+  giants, pulsars, black holes (and other dwarf-star-type objects - Boo
+  said "swarf stars," read as "dwarf stars," to be confirmed) each get a
+  distinct density multiplier, so e.g. a black hole can out-pull a star of
+  the same visual size - preserves the "should feel unfairly strong"
+  fantasy for named exotic types specifically, without making every
+  ordinary planet a stat you have to inspect.
+
+**What's already in `core` vs. genuinely new work** (for scoping a future
+session - none of this is built yet beyond what's noted):
+- Already have: [GravitySystem]/[GravitySourceComponent]/
+  [GravityAffectedComponent] (inverse-square gravity, currently
+  fixed-mass), fixed-timestep [PhysicsSystem], Ashley ECS,
+  [DragInputProcessor] (a *different* input scheme than the pull-release
+  aiming this loop needs).
+- Genuinely new, not yet built: pull-back-release aiming input; a
+  missile/projectile entity that spawns on a shot, flies under gravity,
+  and collides with a character or celestial body; a character-health
+  system; making celestial-body mass mutable and feeding it back into
+  [GravitySourceComponent]; a movement-budget/turn controller (whose turn,
+  remaining pre-/post-shot steps, hand-off logic); a minimal AI opponent
+  that can choose an aim/power to attempt a hit; a scrolling/zooming
+  camera for levels bigger than one screen; procedural level generation
+  with an escalating complexity budget (more/varied bodies, moons, exotic
+  well types, growing squad sizes per level); a squad/roster system for
+  fielding multiple characters per side.
+
+**Confirmed since (Sept 2026 session, continued):**
+- "Dwarf stars" confirmed correct (not a mishearing).
+- **Win condition:** reduce every character on the opposing squad's health
+  to zero.
+- **Celestial bodies can be fully destroyed** - reducing a body's mass to
+  zero removes it and its gravity well from the field entirely, not just
+  weakens it to some floor. Boo, explicit: in later stages this can become
+  a deliberate strategy or even a necessity (e.g. eliminating a well
+  that's making a shot impossible), not just an incidental side effect.
+- **Attackable targets generalize beyond characters.** In later stages,
+  bases and satellite weapons (and potentially other structures) may
+  appear on the field. The general rule: anything capable of attacking the
+  player also has its own hit points that must be reduced to zero, same as
+  a character - not a separate system, just the same health/damage model
+  applied to a broader category of target. Not needed for early levels or
+  Phase 8 below - flagging for whenever bases/satellites actually get
+  designed.
+
+**Still genuinely open:**
+- Whether a damaged celestial body visibly shrinks as its mass drops, or
+  keeps its visual size while only an internal mass value changes.
+- Trebuchet's actual weapon behavior - named but not yet designed.
+
+## Phase 8: pull-and-release aiming + a gravity-curved projectile
+
+**Status: ✅ DONE - confirmed on-device**, including a gravity-tuning
+follow-up (see below). Implements the scope agreed
+in "Core gameplay loop" above, deliberately minimal: [SlingshotInputProcessor]
+(new) reads a pull-back-and-release drag from a fixed launch point and hands
+[PlayScreen] a launch velocity; `PlayScreen.fireMissile()` spawns a small
+dynamic body tagged [GravityAffectedComponent] (so the existing
+[GravitySystem] curves it exactly like the orbiting-body milestone) and the
+new [ProjectileComponent] marker; [ProjectileContactListener] (new) detects
+the missile touching anything and removes it, logging the impact - no
+health/damage/cratering yet, a hit is only *detected* for now.
+
+Scene: one star (the only gravity source this phase), two static planets
+(launch and target, no gravity pull yet - both deliberate Phase 8
+simplifications, see "Core gameplay loop" above), and a fixed launch point
+just above the launch planet's surface with a small always-visible cyan
+marker circle (added beyond the original scope discussion - without it
+there'd be no visual cue at all for where to touch, since the launch point
+isn't a real Box2D body the debug renderer would draw). [DragInputProcessor]
+is no longer wired into `PlayScreen` - nothing in this scene is
+[DraggableComponent]-tagged anymore - but the class itself is untouched and
+expected to matter again once character movement needs a drag interaction.
+
+The Phase 7 HUD label needed no code changes at all: it already tracked
+"whichever [GravityAffectedComponent] entity exists" rather than the
+orbiting body specifically, so it now naturally shows the in-flight
+missile's Y position instead (blank when no missile is in flight) - exactly
+the reuse Phase 7 was built to prove.
+
+**First on-device test result: gravity felt too strong / too dramatic.**
+Boo's exact words - "more dramatic than feels good," not necessarily wrong
+physics, just not fun. Rather than iterating on tuning constants blind by
+guessing numbers from a text description back and forth, Boo asked for a
+live, on-device tuning tool instead - added immediately as part of Phase 8:
+
+- **`GravitySystem.gravityMultiplier`** (new `var`, defaults to `1f`) - a
+  runtime-adjustable multiplier layered on top of the existing tuned
+  G/mass math in `applyForces()`. Not a `const` like `G` - meant to change
+  while the app is running, and takes effect immediately (including on an
+  already-in-flight missile), since `applyForces()` reads it fresh every
+  physics tick.
+- **`GravityDebugController`** (new file) - two on-screen tap zones,
+  top-right corner, that nudge the multiplier down/up by 0.1 per tap
+  (clamped between 0.1 and 3.0). Deliberately left permanently wired in,
+  not gated behind a build flag - this project has no release/Play Store
+  build to worry about a debug control leaking into (see "Debug-only
+  signing" above) - so it stays available as a standing tuning tool for
+  future phases too, not removed after Phase 8.
+- `PlayScreen` draws the two buttons plus a live "Gravity x1.0"-style
+  readout in the top-right corner, and wires the controller into the input
+  multiplexer ahead of the aiming input.
+- **Confirmed on-device: `0.7` feels right.** Boo tuned it live with the
+  buttons and landed on 0.7 - now baked in as `GravitySystem
+  .gravityMultiplier`'s actual default (still a `var`, still fully
+  adjustable live via the same buttons from this new baseline, not locked
+  in).
+- The buttons themselves needed a follow-up fix after the first on-device
+  try: too small to comfortably tap (bumped from 100 to 160 reference
+  pixels), and the "Gravity xN.N" label's Y math was wrong - it tried to
+  position the label *above* the button row by adding to a Y value that
+  was already near the top of the screen, pushing it off-screen entirely.
+  Fixed by reserving vertical space for the label up front (`labelReserve`)
+  and hanging the button row below that reserved space, instead of trying
+  to place the label above an already-placed row.
+- **Status: ✅ DONE - confirmed on-device**, including the button-size and
+  label-position fixes and the final `0.7` gravity multiplier value.
+
+### How to test Phase 8 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Debug wireframe view should show: a larger circle near the
+   top-center (the star), two same-size circles at the same height near the
+   bottom-left and bottom-right (launch and target planets), and a small
+   cyan marker circle just above the left (launch) planet.
+3. Touch down near the cyan marker and drag - a yellow line should appear
+   from the marker to your finger, updating live as you drag.
+4. Release - the yellow line disappears and a missile should launch in the
+   *opposite* direction from your drag, curving as it flies (pulled toward
+   the star, not going in a straight line) rather than flying dead straight.
+5. Watch what happens when it hits something (either planet, or the star):
+   the missile should disappear, and Logcat (filter by tag
+   `ProjectileContactListener`) should show a "Missile impact" log line -
+   confirms the hit was detected even though nothing visible happens yet
+   (no damage/crater system exists).
+6. HUD check: while a missile is in flight, the top-left label should read
+   "Missile Y: <number>" and update live; it should go blank again once the
+   missile is removed after impact.
+7. Try a few different pull angles/distances - dragging harder should
+   launch a visibly faster shot (clamped at some maximum - see
+   `MAX_MISSILE_SPEED`), and touching down far from the marker should NOT
+   start aiming at all (confirms `AIM_START_RADIUS` is working).
+8. **Gravity tuning:** top-right corner should show two small buttons
+   ("-" and "+") and a "Gravity x1.0" readout above them. Tap "-" a few
+   times, then fire another shot - the curve should be noticeably gentler.
+   Tap "+" past 1.0 and fire again - noticeably more dramatic. Find whatever
+   multiplier value feels right, then tell me that number (the readout
+   updates live) so it can become the new default - no more back-and-forth
+   guessing needed.
+9. If the curve looks wrong in some other way (dead straight regardless of
+   the multiplier, snaps into the star instantly, or barely deflects at
+   all even at high multiplier values) or the aim/fire feel is off in
+   general, tell me what it looked like - `PlayScreen`'s other tuning
+   constants (`PULL_POWER_SCALE`, `MAX_MISSILE_SPEED`, planet/star
+   placement) are easy to adjust too, once I know which direction it's off
+   in.
 
 ### How to test the gravity-well milestone on-device
 
@@ -694,6 +925,18 @@ between machines/tools.
 - Boo prefers step-by-step pacing with no assumed familiarity with dev tool
   UIs (Android Studio menus, git terminal) — see Claude's memory for the
   full standing preference and the "SBS" shorthand.
+- **Git identity for this repo, set locally (not `--global`) in the Linux
+  VM behind the device bridge (Sept 2026 session):** `user.name devavona`,
+  `user.email dev@delavona.com` (Boo's own domain — distinct from
+  "devavona," which is just his dev-handle naming convention, not a
+  domain). Needed because this VM had never run a git command before and
+  had no identity configured at all - unrelated to whatever's set up in
+  Boo's actual Windows git/Git Bash. First commit made with it:
+  `9bacaa4` ("Add generic difficulty scoring engine..."). Still
+  uncommitted/unpushed beyond that at time of writing - `gradlew.bat`'s
+  line-ending change (see above) deliberately left unstaged. Standing rule
+  unchanged: Claude may init/commit, Boo always runs the actual `git
+  push`.
 - This file is kept in sync in two places: here in the repo (so a fresh clone
   tells the whole story on its own) and in the "Physics Dual" Claude Project's
   docs (so a brand-new chat can pick up context without touching Boo's PC at

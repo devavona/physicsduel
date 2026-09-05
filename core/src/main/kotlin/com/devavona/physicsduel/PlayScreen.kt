@@ -9,9 +9,11 @@ import com.badlogic.gdx.Input
 import com.badlogic.gdx.InputAdapter
 import com.badlogic.gdx.InputMultiplexer
 import com.badlogic.gdx.Screen
+import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.GL20
 import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.physics.box2d.Body
 import com.badlogic.gdx.physics.box2d.Box2D
@@ -28,15 +30,25 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * demo), now wrapped as a [Screen] instead of being the app's top-level
  * class. Pressing Back pauses rather than quitting - see [PauseScreen].
  *
- * **Post-foundation milestone: orbital gravity-well mechanic.** The original
- * demo (a circle falling under uniform gravity, bouncing inside four walls)
- * has been replaced with the first real gameplay direction: a central
- * "star" body that pulls a smaller body into a curving orbit via
- * [GravitySystem]'s custom point-source gravity, instead of Box2D's uniform
- * world gravity. There are deliberately no boundary walls anymore - an
- * orbit needs open space to curve through, not a box to bounce inside - and
- * [world]'s own gravity vector is zeroed out, since [GravitySystem] is now
- * entirely responsible for every pull a body feels.
+ * **Phase 8 milestone: pull-and-release aiming + a gravity-curved
+ * projectile.** Replaces the orbital gravity-well milestone's demo (a
+ * single body orbiting a star, draggable via [DragInputProcessor]) with the
+ * first real *combat* interaction: a fixed launch point on one planet,
+ * pull-back-and-release aiming ([SlingshotInputProcessor]), and a fired
+ * missile that curves under the star's gravity exactly like the orbiting
+ * body did, via the same [GravitySystem]. See PROJECT_STATE.md's "Phase 8"
+ * entry for the full scope and its deliberate simplifications: only the
+ * star exerts gravity this phase (the two planets don't pull yet, even
+ * though every celestial body is confirmed to eventually pull), there's no
+ * character/avatar entity yet (just a fixed launch point), and a hit is
+ * only *detected* (logged, missile removed) - no health, damage, or
+ * cratering yet.
+ *
+ * [DragInputProcessor] is no longer wired up here - nothing in this
+ * milestone's scene is tagged [DraggableComponent] anymore, since the demo
+ * body it used to drag is gone. The class itself is untouched and stays in
+ * the codebase for when character movement needs exactly this drag
+ * interaction again.
  *
  * Deliberately NOT disposed on [hide] - hide() is called every time we
  * navigate away, including a temporary pause, and disposing there would
@@ -52,55 +64,63 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val WORLD_WIDTH = 9f
         private const val WORLD_HEIGHT = 16f
 
-        // Gravity-well demo tuning. See GravitySystem's class doc comment
-        // for why these are hand-picked "game feel" numbers, not realistic
-        // ones - STAR_MASS in particular only means anything relative to
-        // GravitySystem.G, they're tuned as a pair.
-        private const val STAR_RADIUS = 0.6f
+        // Scene tuning - hand-picked "game feel" numbers, not realistic ones,
+        // same spirit as the orbital milestone's STAR_MASS/ORBIT_RADIUS (see
+        // GravitySystem's class doc comment). All meant to be re-tuned after
+        // real-device testing, not treated as final.
+        private const val STAR_RADIUS = 0.5f
         private const val STAR_MASS = 9f
-        private const val ORBITING_BODY_RADIUS = 0.3f
-        private const val ORBIT_RADIUS = 3f // starting distance from the star, in world units
+        private const val PLANET_RADIUS = 0.8f
+        private const val MISSILE_RADIUS = 0.15f
+        private const val LAUNCH_MARKER_RADIUS = 0.2f
 
-        /**
-         * Launching at exactly the closed-form circular-orbit speed (factor
-         * 1.0) produces a perfect circle - constant distance, constant
-         * speed, forever, by definition of what a circular orbit *is*. That
-         * turned out to be the correct explanation for why the orbit looked
-         * "static" once the precession bug was fixed (see PROJECT_STATE.md)
-         * - it wasn't stuck, it was doing exactly what a circular orbit does.
-         * Launching slower than that speed instead - still purely
-         * tangential, just less of it - makes the starting point the
-         * *farthest* point of the orbit (apoapsis) rather than the only
-         * distance it ever reaches, so gravity pulls it in closer than
-         * [ORBIT_RADIUS] before it swings back out: a real ellipse, with a
-         * visibly closer/faster point and a visibly farther/slower point,
-         * matching Kepler's second law - still a closed, stable, repeating
-         * orbit, not a decaying one (see the "Deliberately not modeled yet"
-         * note in PROJECT_STATE.md for why this and orbital decay are
-         * different things). 0.85 was chosen to keep the close approach
-         * comfortably clear of the star's own radius - much lower and the
-         * ellipse gets thin enough that the near pass grazes the star.
-         */
-        private const val ORBIT_SPEED_FACTOR = 0.85f
+        // Launch/target planets sit at the same height, star above and
+        // between them - a straight-line shot passes well below the star, so
+        // using its pull to curve a shot up and over is a real aiming
+        // choice, not the only way to reach the target.
+        private const val LAUNCH_PLANET_X = 2f
+        private const val TARGET_PLANET_X = 7f
+        private const val PLANETS_Y = 4f
+        private const val STAR_X = (LAUNCH_PLANET_X + TARGET_PLANET_X) / 2f
+        private const val STAR_Y = 9f
+
+        // How far above the launch planet's surface the fixed launch point
+        // sits - needs at least MISSILE_RADIUS of clearance so a freshly
+        // spawned missile doesn't immediately overlap the planet's own
+        // fixture and register a same-instant "impact".
+        private const val LAUNCH_POINT_CLEARANCE = 0.3f
+
+        // Converts a pull-back drag distance (world units) into launch
+        // speed, clamped to MAX_MISSILE_SPEED so a wild drag can't fire an
+        // unreasonably fast shot.
+        private const val PULL_POWER_SCALE = 4f
+        private const val MAX_MISSILE_SPEED = 15f
     }
 
     private lateinit var camera: OrthographicCamera
     private lateinit var viewport: Viewport
     private lateinit var world: World
     private lateinit var debugRenderer: Box2DDebugRenderer
+    private lateinit var shapeRenderer: ShapeRenderer
     private lateinit var engine: Engine
-    private lateinit var dragInputProcessor: DragInputProcessor
+    private lateinit var slingshotInputProcessor: SlingshotInputProcessor
+    private lateinit var projectileContactListener: ProjectileContactListener
+    private lateinit var launchPoint: Vector2
+    private lateinit var gravitySystem: GravitySystem
+    private lateinit var gravityDebugController: GravityDebugController
 
     // Phase 7 HUD: a screen-pixel (not world-unit) camera + batch, separate
     // from [camera]/[viewport] above which stay in Box2D world units for the
     // debug renderer. Queries the ECS each frame rather than holding a direct
-    // Body reference, so this keeps working even as more bodies are added -
-    // it specifically tracks "the entity being pulled by gravity" (the
-    // orbiting body), not the star, which never moves.
+    // Body reference. Originally tracked the orbital milestone's orbiting
+    // body; now naturally tracks whichever [GravityAffectedComponent] body
+    // currently exists instead - Phase 8's in-flight missile, when there is
+    // one - with zero changes needed to this rendering code, exactly the
+    // "any future HUD reuses this pattern" payoff Phase 7 was built to prove.
     private val hudCamera = OrthographicCamera()
     private val hudBatch = SpriteBatch()
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
-    private val orbitingBodyFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
+    private val gravityAffectedFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
 
     init {
         Box2D.init()
@@ -109,52 +129,56 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         viewport = FitViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)
         camera.position.set(WORLD_WIDTH / 2f, WORLD_HEIGHT / 2f, 0f)
 
-        // Zero, not -9.8: GravitySystem is now the only source of gravity -
-        // see the class doc comment.
+        // Zero, not -9.8: GravitySystem is the only source of gravity - see
+        // its class doc comment.
         world = World(Vector2(0f, 0f), true)
         debugRenderer = Box2DDebugRenderer()
+        shapeRenderer = ShapeRenderer()
 
         engine = Engine()
-        // GravitySystem is a plain class, not an Ashley system - it's
-        // driven from inside PhysicsSystem's fixed-timestep loop via
-        // beforeStep, exactly once per physics tick, rather than once per
-        // render frame. See PhysicsSystem's beforeStep doc comment and
-        // GravitySystem's own class doc comment for why that timing matters
-        // (on-device testing of an earlier per-frame version showed the
-        // orbit slowly rotating in place - apsidal precession - caused by
-        // gravity's force application not lining up with the physics ticks
-        // that actually consume it).
-        val gravitySystem = GravitySystem(engine)
+        // GravitySystem is a plain class, not an Ashley system - see its own
+        // class doc comment and PhysicsSystem's beforeStep doc comment for
+        // why (apsidal precession bug, fixed by applying gravity exactly
+        // once per physics tick instead of once per render frame).
+        gravitySystem = GravitySystem(engine)
         engine.addSystem(PhysicsSystem(world, beforeStep = gravitySystem::applyForces))
 
+        projectileContactListener = ProjectileContactListener(engine)
+        world.setContactListener(projectileContactListener)
+
         val star = createStar()
-        val orbitingBody = createOrbitingBody()
         engine.addEntity(
             Entity().apply {
                 add(PhysicsBodyComponent(star))
                 add(GravitySourceComponent(mass = STAR_MASS))
             }
         )
-        engine.addEntity(
-            Entity().apply {
-                add(PhysicsBodyComponent(orbitingBody))
-                add(DraggableComponent())
-                add(GravityAffectedComponent())
-            }
-        )
 
-        // The star is static, so it's never itself moved by anything - the
-        // same "reuse an existing static body" trick the removed floor
-        // previously provided (see DragInputProcessor's anchorBody doc
-        // comment), just repurposed now that there are no walls to reuse it
-        // from.
-        dragInputProcessor = DragInputProcessor(engine, world, viewport, anchorBody = star)
+        // Deliberately NOT tagged GravitySourceComponent - Phase 8's scope
+        // keeps the star as the only thing that pulls, even though every
+        // celestial body is confirmed to eventually exert gravity (see
+        // PROJECT_STATE.md). Plain static bodies for now, not added to the
+        // ECS at all - nothing about them needs an Ashley query yet.
+        createPlanet(LAUNCH_PLANET_X, PLANETS_Y)
+        createPlanet(TARGET_PLANET_X, PLANETS_Y)
+
+        launchPoint = Vector2(LAUNCH_PLANET_X, PLANETS_Y + PLANET_RADIUS + LAUNCH_POINT_CLEARANCE)
+
+        slingshotInputProcessor = SlingshotInputProcessor(
+            launchPoint = launchPoint,
+            viewport = viewport,
+            powerScale = PULL_POWER_SCALE,
+            maxSpeed = MAX_MISSILE_SPEED,
+            onFire = ::fireMissile
+        )
+        gravityDebugController = GravityDebugController(gravitySystem)
     }
 
     override fun show() {
         val multiplexer = InputMultiplexer()
         multiplexer.addProcessor(BackKeyHandler())
-        multiplexer.addProcessor(dragInputProcessor)
+        multiplexer.addProcessor(gravityDebugController)
+        multiplexer.addProcessor(slingshotInputProcessor)
         Gdx.input.inputProcessor = multiplexer
         Gdx.input.setCatchKey(Input.Keys.BACK, true) // otherwise Android treats Back as "quit app"
         resizeHudCamera()
@@ -175,16 +199,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * The gravity well itself: a static body at the center of the world -
-     * static so it never itself gets pulled around, exactly like a real
-     * star is many orders of magnitude heavier than anything orbiting it.
-     * [GravitySourceComponent] (not this body's Box2D mass, which is zero
-     * for any static body) is what [GravitySystem] actually reads.
+     * The gravity well: a static body - static so it never itself gets
+     * pulled around, exactly like a real star is many orders of magnitude
+     * heavier than anything nearby. [GravitySourceComponent] (not this
+     * body's Box2D mass, which is zero for any static body) is what
+     * [GravitySystem] actually reads.
      */
     private fun createStar(): Body {
         val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.StaticBody
-            position.set(WORLD_WIDTH / 2f, WORLD_HEIGHT / 2f)
+            position.set(STAR_X, STAR_Y)
         }
         val body = world.createBody(bodyDef)
         val shape = CircleShape().apply { radius = STAR_RADIUS }
@@ -194,75 +218,152 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * The body [GravitySystem] pulls into orbit around the star. Placed
-     * [ORBIT_RADIUS] to the right of the star and launched with a tangential
-     * (perpendicular-to-the-star) velocity, not a straight fall toward it -
-     * exactly like a real orbit, "falling and missing": released with zero
-     * velocity it would simply fall straight in, so the sideways velocity is
-     * what turns that fall into a curve. `v = sqrt(G * starMass / r)` is the
-     * closed-form speed for a perfectly *circular* orbit at this distance,
-     * derived from setting gravitational force equal to the centripetal
-     * force a circular orbit requires - scaled down by [ORBIT_SPEED_FACTOR]
-     * (see its own doc comment) so the result is a stable *ellipse* instead,
-     * with a real near/far point and a visible speed difference between
-     * them, rather than a perfect unchanging circle.
+     * One of the two planets - purely a static surface to aim from/hit,
+     * no gravity pull yet (see the class doc comment's Phase 8 scope note).
      */
-    private fun createOrbitingBody(): Body {
-        val startX = WORLD_WIDTH / 2f + ORBIT_RADIUS
-        val startY = WORLD_HEIGHT / 2f
+    private fun createPlanet(x: Float, y: Float): Body {
         val bodyDef = BodyDef().apply {
-            type = BodyDef.BodyType.DynamicBody
-            position.set(startX, startY)
+            type = BodyDef.BodyType.StaticBody
+            position.set(x, y)
         }
         val body = world.createBody(bodyDef)
-        val shape = CircleShape().apply { radius = ORBITING_BODY_RADIUS }
+        val shape = CircleShape().apply { radius = PLANET_RADIUS }
+        body.createFixture(shape, 0f)
+        shape.dispose()
+        return body
+    }
+
+    /**
+     * Fires one missile from [launchPoint] with the given velocity (already
+     * computed by [SlingshotInputProcessor] - this function just spawns the
+     * body/entity, it doesn't know about pull vectors or power scaling).
+     * Tagged [GravityAffectedComponent] so [GravitySystem] curves its
+     * flight, and [ProjectileComponent] so [ProjectileContactListener]
+     * knows to remove it on impact instead of leaving it as a permanent
+     * scene body.
+     */
+    private fun fireMissile(velocity: Vector2) {
+        val bodyDef = BodyDef().apply {
+            type = BodyDef.BodyType.DynamicBody
+            position.set(launchPoint)
+        }
+        val body = world.createBody(bodyDef)
+        val shape = CircleShape().apply { radius = MISSILE_RADIUS }
         val fixtureDef = FixtureDef().apply {
             this.shape = shape
             density = 1f
             friction = 0.4f
-            restitution = 0.3f
+            restitution = 0.2f
         }
         body.createFixture(fixtureDef)
         shape.dispose()
+        body.linearVelocity = velocity
 
-        val circularOrbitSpeed = kotlin.math.sqrt(GravitySystem.G * STAR_MASS / ORBIT_RADIUS)
-        val orbitalSpeed = circularOrbitSpeed * ORBIT_SPEED_FACTOR
-        body.setLinearVelocity(0f, orbitalSpeed) // perpendicular to the star->body radius (which is purely horizontal here)
-
-        return body
+        engine.addEntity(
+            Entity().apply {
+                add(PhysicsBodyComponent(body))
+                add(GravityAffectedComponent())
+                add(ProjectileComponent())
+            }
+        )
     }
 
     override fun render(delta: Float) {
         engine.update(delta) // drives PhysicsSystem, which owns the fixed-timestep accumulator
+        // Only safe to call after world.step() has fully returned for this
+        // frame (see ProjectileContactListener's class doc comment) -
+        // engine.update above is exactly that point, since PhysicsSystem's
+        // step loop is synchronous.
+        projectileContactListener.flushRemovals(world)
 
         Gdx.gl.glClearColor(0.043f, 0.071f, 0.126f, 1f) // deep space navy
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
 
         camera.update()
         debugRenderer.render(world, camera.combined)
-
+        renderDebugOverlay()
         renderHud()
+        renderGravityDebugControls()
     }
 
     /**
-     * A minimal live-updating overlay: the orbiting body's world-space Y
-     * position, redrawn every frame from current simulation state. The
-     * actual value shown is a placeholder (no score/health exists yet) -
-     * the point of Phase 7 is proving 2D screen-space text can be drawn on
-     * top of the world-space debug view every frame without interfering
-     * with it, which is the pattern any future HUD (score, health, timer)
-     * will reuse.
+     * A launch-point marker (always visible - there's no real avatar entity
+     * yet for the debug renderer to draw, so without this there'd be no
+     * visual cue at all for where to touch to start aiming) plus the live
+     * pull line while aiming. [Box2DDebugRenderer] only knows how to draw
+     * physics bodies/joints, not arbitrary shapes, so this uses
+     * [ShapeRenderer] directly. Purely a Phase 8 testing aid, not meant to
+     * be the final aiming UI.
+     */
+    private fun renderDebugOverlay() {
+        shapeRenderer.projectionMatrix = camera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Line)
+        shapeRenderer.color = Color.CYAN
+        shapeRenderer.circle(launchPoint.x, launchPoint.y, LAUNCH_MARKER_RADIUS, 16)
+        slingshotInputProcessor.currentAimLine?.let { pull ->
+            shapeRenderer.color = Color.YELLOW
+            val dragPoint = Vector2(launchPoint).add(pull)
+            shapeRenderer.line(launchPoint, dragPoint)
+        }
+        shapeRenderer.end()
+    }
+
+    /**
+     * Live-updating overlay showing the Y position of whichever
+     * [GravityAffectedComponent] body currently exists - see this class's
+     * field doc comment for why that's now Phase 8's in-flight missile
+     * (when there is one) instead of the retired orbiting demo body, with
+     * no code changes needed here.
      */
     private fun renderHud() {
-        val trackedBody = engine.getEntitiesFor(orbitingBodyFamily).firstOrNull()?.let {
+        val trackedBody = engine.getEntitiesFor(gravityAffectedFamily).firstOrNull()?.let {
             physicsBodyMapper.get(it).body
         }
         hudCamera.update()
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
-        val text = trackedBody?.let { "Y: %.2f".format(it.position.y) } ?: ""
+        val text = trackedBody?.let { "Missile Y: %.2f".format(it.position.y) } ?: ""
         val margin = HudFont.scaled(16f) // density-scaled, not a fixed pixel count - see HudFont
         HudFont.font.draw(hudBatch, text, margin, Gdx.graphics.height - margin)
+        hudBatch.end()
+    }
+
+    /**
+     * Draws [GravityDebugController]'s two tap zones and the current
+     * multiplier value, top-right corner - screen-space, same as [renderHud].
+     * Debug-only tuning UI (see that class's doc comment), not final art.
+     */
+    private fun renderGravityDebugControls() {
+        val minusRect = gravityDebugController.minusButtonRect
+        val plusRect = gravityDebugController.plusButtonRect
+
+        shapeRenderer.projectionMatrix = hudCamera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        shapeRenderer.color = Color(0.25f, 0.25f, 0.32f, 1f)
+        shapeRenderer.rect(minusRect.x, minusRect.y, minusRect.width, minusRect.height)
+        shapeRenderer.rect(plusRect.x, plusRect.y, plusRect.width, plusRect.height)
+        shapeRenderer.end()
+
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val minusLabel = "-"
+        HudFont.font.draw(
+            hudBatch, minusLabel,
+            minusRect.x + (minusRect.width - HudFont.widthOf(minusLabel)) / 2f,
+            minusRect.y + minusRect.height * 0.65f
+        )
+        val plusLabel = "+"
+        HudFont.font.draw(
+            hudBatch, plusLabel,
+            plusRect.x + (plusRect.width - HudFont.widthOf(plusLabel)) / 2f,
+            plusRect.y + plusRect.height * 0.65f
+        )
+        val multiplierLabel = "Gravity x%.1f".format(gravitySystem.gravityMultiplier)
+        HudFont.font.draw(
+            hudBatch, multiplierLabel,
+            plusRect.x + plusRect.width - HudFont.widthOf(multiplierLabel),
+            gravityDebugController.labelBaselineY
+        )
         hudBatch.end()
     }
 
@@ -287,6 +388,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // never automatically by the Game/Screen lifecycle.
         world.dispose()
         debugRenderer.dispose()
+        shapeRenderer.dispose()
         hudBatch.dispose()
     }
 }

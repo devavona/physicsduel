@@ -67,6 +67,18 @@ class GravitySystem(engine: Engine) {
         private const val MIN_DISTANCE = 0.5f
     }
 
+    /**
+     * Debug/tuning multiplier applied on top of every gravity calculation -
+     * added so gravity's overall "feel" can be adjusted live, on-device,
+     * without recompiling (see [GravityDebugController]). Default of 0.7
+     * is Boo's own confirmed-good value from on-device testing of Phase 8's
+     * scene (the original 1.0 - i.e. the raw tuned G/mass math - felt "more
+     * dramatic than feels good"). Not a `const` - unlike [G], this is meant
+     * to change at runtime, and still fully adjustable live via
+     * [GravityDebugController] from this new baseline.
+     */
+    var gravityMultiplier: Float = 0.7f
+
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
     private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
 
@@ -109,7 +121,7 @@ class GravitySystem(engine: Engine) {
                 // unlike the source's) is what makes heavier bodies feel
                 // "heavier" - same acceleration as a lighter body at the
                 // same distance, but more force/momentum behind it.
-                val forceMagnitude = G * sourceMass * affectedBody.mass / (distance * distance)
+                val forceMagnitude = G * sourceMass * affectedBody.mass / (distance * distance) * gravityMultiplier
                 force.set(direction).scl(forceMagnitude)
 
                 affectedBody.applyForceToCenter(force, true)

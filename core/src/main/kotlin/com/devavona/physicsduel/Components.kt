@@ -33,3 +33,12 @@ class GravitySourceComponent(val mass: Float) : Component
  * acceleration it computes back into a force to hand Box2D.
  */
 class GravityAffectedComponent : Component
+
+/**
+ * Marker/tag component: entities with this are a fired projectile (Phase 8's
+ * missile) rather than a permanent scene body (a planet, a star). Lets
+ * [ProjectileContactListener] tell "something that should be removed on
+ * impact" apart from anything else a body might collide with, without
+ * needing every non-projectile body to also carry some "permanent" marker.
+ */
+class ProjectileComponent : Component
