@@ -358,6 +358,138 @@ second star/planet) instead of just one? None of this needs deciding right
 now - flagging it so the next session picks up here instead of re-deriving
 "what's next" from scratch.
 
+## Game design exploration — roguelite direction (Sept 2026 session)
+
+Boo used Gravitee Wars (2010 Flash game by FunkyPear — turn-based space
+artillery where shots curve under planetary/black-hole gravity, destructible
+terrain, ~10 weapon types, team-vs-team, since followed by "Gravitee Wars
+Online" and a 2024+ Steam remake by the same studio) as a reference point for
+this conversation — explicitly NOT as something to clone. See the existing
+"Important naming constraint" note above: nothing here may be branded
+"Gravity Wars"/"Gravitee Wars".
+
+**What Boo said stuck with them about it, and why**, in his own terms:
+- Turn-based pacing — easy to do a run, quit, and pick back up later; can
+  play while doing other things. (Note: this is already partly true of what
+  `core` provides — `PlayScreen` surviving pause/resume and `SaveManager`
+  surviving real process death were both built before this conversation
+  connected them explicitly to this instinct.)
+- No network requirement (consistent with the standing "Offline only"
+  decision above).
+- Complexity that grows over time without becoming annoying/overwhelming.
+- The orbital-mechanics/gravity-aiming skill itself — the part that
+  "scratches the inner physics nerd."
+- Tone: cartoony/lighthearted enough that it reads as detached from being a
+  literal war game, despite the "war" framing.
+- A (self-described "poor but real") comparison to Sid Meier's Civilization —
+  not for its content, but for the same turn-based / bite-sized-session /
+  gradually-unfolding-complexity *shape* of play.
+
+**Opponent structure, confirmed:** one or more computer/AI opponents.
+PvP is explicitly not being considered at this point.
+
+**Structure, confirmed: roguelite.** Talking it through surfaced a real
+design tension Boo identified himself: straightforward permanent power
+growth (get strictly stronger every run, forever) eventually produces an
+end-state where the player is so powerful nothing is challenging anymore
+and the fun drains out. Discussed how Hades and Vampire Survivors each
+solve this differently (Hades: permanent progression is mostly
+access/refinement rather than raw power, and the player can opt into
+harder enemies for better rewards via its Heat/Pact-of-Punishment system;
+Vampire Survivors: huge in-run power growth is fine because each run is
+short and enemy density/bosses escalate to match, while between-run unlocks
+are mostly new characters/weapons — variety, not a stacking multiplier).
+
+**Progression model, confirmed: three layers**, Boo's own framing:
+1. **Meta-progression (persists across runs)** — unlocks *availability*:
+   new base stats, power tiers, and weapon options get added to the pool of
+   things that CAN show up. This is deliberately about growing the menu,
+   not directly handing out raw power — the structural fix for the
+   too-powerful-eventually problem above.
+2. **In-run build** — of whatever is currently unlocked, which specific
+   things get drafted/equipped/combined on THIS run is what actually
+   determines that run's strategy and power level. Since this is
+   procedurally offered each run, no two runs assemble the same way even
+   from an identical unlocked pool.
+3. **In-run currency** — a resource earned and spent only within a single
+   run (not carried between runs), creating a live economic decision loop
+   (spend now vs. bank it, this upgrade vs. that one) on top of the build
+   choices, giving each run its own distinct flavor/identity.
+
+**Not yet decided (open for a future session):**
+- What a single "run" is actually made of — one continuous
+  procedurally-generated battlefield, or a sequence of discrete
+  procedurally-generated encounters (closer to Gravitee Wars' level-by-level
+  structure)?
+- Whether Hades-style opt-in difficulty scaling (challenge keeps pace with
+  player choice, not just player power) gets added on top of the
+  three-layer progression model, or whether the model alone is judged
+  sufficient. **Explicitly deferred, not a current focus (Boo, explicit):**
+  Boo hasn't thought as far as a "beat the game once, then unlock
+  harder/more-rewarding replay options" structure (Hades' Pact of
+  Punishment: a checklist of named difficulty modifiers, each worth some
+  points toward a "Heat" score, freely re-chosen before every run with no
+  permanent commitment, where higher Heat means better post-run rewards —
+  see the Pact of Punishment writeup for the full mechanic if picking this
+  back up). Noted for future consideration only — not to be designed or
+  built now. However, Boo asked to design and build the generic scoring
+  plumbing this concept would eventually need into `core` now, deliberately
+  decoupled from any specific "opt-in replay" feature or real gameplay
+  content, so branching into this later doesn't require a retrofit — see
+  the dedicated section below once that's built.
+- No working title chosen yet (see the existing naming constraint above).
+- How any of this concretely attaches to the existing gravity-well `core`
+  (single star/orbit today; a roguelite run likely implies procedurally
+  varied gravity-field layouts, multiple AI-controlled bodies, etc.) —
+  not yet designed, flagging for a future session rather than guessing.
+
+## Difficulty scoring engine (Sept 2026 session) — built, not yet tested
+
+Generic, gameplay-agnostic scoring plumbing added to `core` now, ahead of
+any real gameplay content that would use it - see "Game design exploration"
+above for why. **Deliberately avoids Hades' own Pact-of-Punishment/Heat
+terminology anywhere in code or docs (Boo, explicit):** this project likely
+won't ever be hosted for others, but Boo wants to avoid any copyright/
+trademark risk if that ever changes, so the comparison to that game's
+design stays conversational/design-note context only, never baked into
+class or identifier names.
+
+- **`DifficultyModifier`** (new) — describes one selectable difficulty
+  knob: id, display name, points-per-rank, max rank. Defines what a
+  modifier *is*, not what it *does* - no gameplay effect lives here.
+- **`DifficultySelection`** (new) — a chosen rank (0 = off) per modifier
+  id, for one run/attempt. A modifier missing from the selection defaults
+  to rank 0.
+- **`DifficultyScore`** (new) — one pure function: sums `rank *
+  pointsPerRank` across every modifier passed in, clamping each rank to
+  that modifier's `[0, maxRank]` range first.
+- **`DifficultyScoreTest`** (new) — 8 tests: empty selection, empty
+  modifier list, single/multiple modifiers, a modifier missing from the
+  selection, rank clamped above max, rank clamped below zero, and an
+  unknown modifier id in the selection being silently ignored. Uses two
+  clearly-labeled generic placeholder modifiers (`faster_opponents`,
+  `extra_opponents`) - not a claim about what the real modifier set will
+  eventually be.
+- Deliberately NOT yet included: any real modifiers, any save-schema
+  persistence, any reward-scaling formula - all real future work once
+  actual gameplay content and an economy system exist to hang them on.
+- No Gradle changes needed - pure Kotlin/JVM, no LibGDX/Box2D dependency,
+  so `DifficultyScoreTest` needs no `GdxTestBootstrap` (unlike
+  `PhysicsSystemTest`/`SaveManagerTest`).
+- **Status: ✅ DONE — confirmed passing on Boo's PC.** All 8
+  `DifficultyScoreTest` tests green after a Gradle sync + run in Android
+  Studio (the local Linux VM behind Claude's device bridge couldn't run
+  this itself - no cached Gradle distribution and no network route to
+  services.gradle.org from that VM, plus only JDK 11 installed there vs.
+  the JDK 17 this project is pinned to; confirmed by trying it directly).
+
+**Unrelated note from this session:** `git status` also showed
+`gradlew.bat` as modified - pure line-ending changes (CRLF vs LF), not
+caused by adding the difficulty files above (Claude never touched that
+file). Predates this session's edits; flagging for Boo rather than
+fixing/reverting unasked - possibly a local git `autocrlf` difference
+between machines/tools.
+
 ### How to test the gravity-well milestone on-device
 
 1. Sync Gradle, build and run as usual.
@@ -549,15 +681,16 @@ now - flagging it so the next session picks up here instead of re-deriving
 
 ## Working notes / environment quirks
 
-- The device bridge's local shell (`device_bash`) has been down every session
-  so far (Phases 1 through 6), including after a full quit/restart of both
-  the Claude desktop app and Android Studio partway through — never actually
-  fixed, just consistently worked around. All file writes to Boo's PC go
-  through stage/commit instead, and git commands are run manually by Boo in
-  Git Bash rather than by Claude directly. If it's ever back in a future
-  session, Claude can go back to running git directly (still following the
+- **Resolved (Sept 2026 session):** `device_bash` "being down" every prior
+  session (Phases 1 through 6) was not a bridge bug — the session simply had
+  no folder connected, so there was nothing under `$HOME/mnt/` for it to
+  operate on. Confirmed by requesting access to `C:\Apps\dev\physicsduel`
+  and re-testing: `device_bash` worked immediately (listed the repo
+  contents). Going forward, Claude can read/edit files and run git directly
+  on Boo's PC via `device_bash` once the folder is connected for the
+  session, instead of routing through stage/commit — still following the
   standing rule: init/commit only, never push — Boo always runs the actual
-  push).
+  push.
 - Boo prefers step-by-step pacing with no assumed familiarity with dev tool
   UIs (Android Studio menus, git terminal) — see Claude's memory for the
   full standing preference and the "SBS" shorthand.
