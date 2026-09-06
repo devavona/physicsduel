@@ -42,3 +42,24 @@ class GravityAffectedComponent : Component
  * needing every non-projectile body to also carry some "permanent" marker.
  */
 class ProjectileComponent : Component
+
+/**
+ * Gives an entity hit points a hit can reduce - the "health lives on
+ * characters, not celestial bodies" half of the agreed damage model (see
+ * PROJECT_STATE.md's "Core gameplay loop" entry; celestial bodies taking
+ * damage to their *mass* instead is separate, still-unbuilt future work).
+ * [applyDamage] is what [ProjectileContactListener] calls on a direct hit -
+ * a safe plain Kotlin field write, unlike actually removing the entity/body
+ * once [isDefeated], which still has to go through that class's deferred-
+ * removal queue since Box2D's world is locked during a contact callback.
+ */
+class HealthComponent(val maxHp: Int, currentHp: Int = maxHp) : Component {
+    var currentHp: Int = currentHp
+        private set
+
+    fun applyDamage(amount: Int) {
+        currentHp = (currentHp - amount).coerceAtLeast(0)
+    }
+
+    val isDefeated: Boolean get() = currentHp <= 0
+}

@@ -902,6 +902,69 @@ on-device.
    `PlayScreen`'s `STAR_MASS`/`ORBIT_RADIUS`/`ORBIT_SPEED_FACTOR`) are easy
    to adjust once I know which direction it's off in.
 
+## Phase 10: health/damage
+
+**Status: ✅ DONE - confirmed on-device.** Implements the "health lives
+on characters, not celestial bodies" half of "Core gameplay loop" above,
+same deliberately-minimal scoping as every phase before it: proves the
+hit-damage-defeat mechanic works end to end before a real character or AI
+carries it.
+
+- **`HealthComponent`** (new, in `Components.kt`) - `maxHp`, a private-set
+  `currentHp`, an `applyDamage(amount)` method (clamps at zero, doesn't go
+  negative), and an `isDefeated` check. Deliberately owns its own damage
+  math rather than letting callers poke `currentHp` directly.
+- **`PlayScreen` now spawns a target entity** near the target planet - a
+  small static body at the same clearance above the surface as the
+  avatar's launch point, tagged `HealthComponent(TARGET_MAX_HP)` (100).
+  Deliberately NOT a full character yet: no movement, no turn structure,
+  no AI of its own - just something with HP to shoot at, so this phase can
+  focus purely on the damage mechanic in isolation.
+- **`ProjectileContactListener`** (Phase 8's "detect a hit" class) now
+  actually applies damage: on a missile's `beginContact`, if the other
+  body carries a `HealthComponent`, `MISSILE_DAMAGE` (25, illustrative -
+  4 hits to defeat the 100-HP target) is subtracted from it; if that
+  reduces it to zero, that entity is queued for removal through the exact
+  same deferred-removal path the spent projectile already uses (both are
+  just "destroy this body, remove this entity" by the time `flushRemovals`
+  runs - no separate code path needed for "defeated" vs. "spent
+  projectile"). A hit on something with no `HealthComponent` (a planet,
+  the star) behaves exactly as it did in Phase 8 - projectile removed, no
+  damage applied anywhere.
+- New third HUD line, top-left (below "Missile Y" and the turn/phase
+  readout): "Target HP: X/100", switching to "Target: DEFEATED" once the
+  target entity has actually been removed from the engine.
+- Deliberately NOT yet included: celestial-body mass/cratering (a miss
+  damaging a planet instead of a character), collateral/splash damage,
+  the avatar having its own HP (nothing can hit it yet - no AI exists),
+  and per-weapon damage differences (only one weapon/missile type exists
+  so far, so every hit does the same `MISSILE_DAMAGE`) - all future work
+  once a real character roster and AI opponent exist.
+
+### How to test Phase 10 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Same scene as Phase 9, plus a new small circle near the
+   top of the target (right) planet - the Phase 10 target.
+3. Top-left, below the turn/phase readout: a third line reading
+   "Target HP: 100/100".
+4. Aim and fire a shot at the target circle. On a direct hit, the HP
+   readout should drop to "75/100", the target circle should still be
+   there (still has HP left), and Logcat (tag `ProjectileContactListener`)
+   should show a "Hit - 75/100 HP remaining" line.
+5. Keep landing direct hits. After the 4th hit, the target circle should
+   disappear from the debug wireframe view entirely, the HUD line should
+   read "Target: DEFEATED", and Logcat should show a "Target defeated"
+   line.
+6. A miss (hitting a planet or the star instead) should behave exactly as
+   it did in Phase 8 - missile disappears, no change to the Target HP
+   line, no damage-related Logcat lines.
+7. If the damage amount or target HP feels off (too tanky, dies in one
+   hit, etc.), tell me what it looked/felt like -
+   `ProjectileContactListener.MISSILE_DAMAGE` and `PlayScreen
+   .TARGET_MAX_HP` are easy to retune once I know which direction it's
+   off in.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

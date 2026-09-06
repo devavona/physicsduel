@@ -55,6 +55,12 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * before anything else builds on top of it. See PROJECT_STATE.md's
  * "Phase 9" entry for the full scope.
  *
+ * **Phase 10 milestone: health/damage.** Adds the target planet's
+ * stand-in defender - a small static [HealthComponent]-tagged body, not a
+ * full character yet (no movement, no turn structure, no AI of its own) -
+ * and wires [ProjectileContactListener] to actually apply damage on a hit
+ * instead of only detecting one. See PROJECT_STATE.md's "Phase 10" entry.
+ *
  * [DragInputProcessor] is no longer wired up here - nothing in this
  * milestone's scene is tagged [DraggableComponent] anymore, since the demo
  * body it used to drag is gone. The class itself is untouched and stays in
@@ -84,6 +90,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val PLANET_RADIUS = 0.8f
         private const val MISSILE_RADIUS = 0.15f
         private const val LAUNCH_MARKER_RADIUS = 0.2f
+
+        // Phase 10's stand-in target - illustrative numbers, not tuned.
+        // 100 HP / 25 damage per hit (see ProjectileContactListener
+        // .MISSILE_DAMAGE) means 4 direct hits to defeat it.
+        private const val TARGET_RADIUS = 0.3f
+        private const val TARGET_MAX_HP = 100
 
         // Launch/target planets sit at the same height, star above and
         // between them - a straight-line shot passes well below the star, so
@@ -146,7 +158,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val hudCamera = OrthographicCamera()
     private val hudBatch = SpriteBatch()
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
+    private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
     private val gravityAffectedFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
+    private val healthFamily = Family.all(HealthComponent::class.java, PhysicsBodyComponent::class.java).get()
 
     init {
         Box2D.init()
@@ -187,6 +201,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // ECS at all - nothing about them needs an Ashley query yet.
         createPlanet(LAUNCH_PLANET_X, PLANETS_Y)
         createPlanet(TARGET_PLANET_X, PLANETS_Y)
+
+        engine.addEntity(
+            Entity().apply {
+                add(PhysicsBodyComponent(createTarget()))
+                add(HealthComponent(TARGET_MAX_HP))
+            }
+        )
 
         avatarMovementController = AvatarMovementController(
             planetCenter = Vector2(LAUNCH_PLANET_X, PLANETS_Y),
@@ -268,6 +289,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         val body = world.createBody(bodyDef)
         val shape = CircleShape().apply { radius = PLANET_RADIUS }
+        body.createFixture(shape, 0f)
+        shape.dispose()
+        return body
+    }
+
+    /**
+     * Phase 10's stand-in for an opposing character: a small static body
+     * sitting above the target planet's surface (same clearance as the
+     * avatar's launch point), tagged [HealthComponent] by the caller so
+     * [ProjectileContactListener] can damage it on a direct hit.
+     * Deliberately not a full character yet - no movement, no turn
+     * structure, no AI - this phase is purely about proving the
+     * hit-damage-defeat mechanic itself before a real character carries it.
+     */
+    private fun createTarget(): Body {
+        val bodyDef = BodyDef().apply {
+            type = BodyDef.BodyType.StaticBody
+            position.set(TARGET_PLANET_X, PLANETS_Y + PLANET_RADIUS + LAUNCH_POINT_CLEARANCE)
+        }
+        val body = world.createBody(bodyDef)
+        val shape = CircleShape().apply { radius = TARGET_RADIUS }
         body.createFixture(shape, 0f)
         shape.dispose()
         return body
@@ -358,6 +400,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderHud()
         renderGravityDebugControls()
         renderMovementControls()
+        renderTargetHud()
     }
 
     /**
@@ -490,6 +533,24 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             rect.x + (rect.width - HudFont.widthOf(label)) / 2f,
             rect.y + rect.height * 0.65f
         )
+    }
+
+    /**
+     * Third HUD line, top-left (below "Missile Y" and the turn/phase
+     * readout): the Phase 10 target's remaining HP, or "DEFEATED" once
+     * [ProjectileContactListener] has actually removed it from the engine
+     * entirely (see [HealthComponent]) - the first on-device look at the
+     * damage model working end to end.
+     */
+    private fun renderTargetHud() {
+        val targetHealth = engine.getEntitiesFor(healthFamily).firstOrNull()?.let { healthMapper.get(it) }
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val text = targetHealth?.let { "Target HP: %d/%d".format(it.currentHp, it.maxHp) } ?: "Target: DEFEATED"
+        val margin = HudFont.scaled(16f)
+        val thirdLineY = Gdx.graphics.height - margin - HudFont.scaled(120f) // below renderHud's and renderMovementControls' lines
+        HudFont.font.draw(hudBatch, text, margin, thirdLineY)
+        hudBatch.end()
     }
 
     override fun resize(width: Int, height: Int) {
