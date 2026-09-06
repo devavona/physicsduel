@@ -721,6 +721,151 @@ live, on-device tuning tool instead - added immediately as part of Phase 8:
    placement) are easy to adjust too, once I know which direction it's off
    in.
 
+## Phase 9: a real avatar + movement-budget/turn structure
+
+**Status: ✅ DONE - confirmed on-device**, including a real viewport/letterboxing bug found and fixed along the way (see below - it affected every HUD element on this screen, not just Phase 9's new controls). Implements the
+movement/turn-structure half of "Core gameplay loop" above, same
+deliberately-minimal spirit as Phase 8: no AI opponent, no health/damage,
+no second character yet - purely proving the movement-budget/turn-boundary
+mechanic feels right in isolation before anything else builds on it.
+
+- **`AvatarMovementController`** (new file) - owns the avatar's position
+  (an angle around the launch planet's center, at a fixed height above its
+  surface - the avatar walks along the surface rather than floating freely)
+  and the turn/budget state machine: a `Phase` of `PRE_SHOT` or
+  `POST_SHOT`, a steps-remaining counter that resets to
+  `MOVEMENT_STEPS_PER_PHASE` (5, the illustrative number from Boo's design
+  conversation) at the start of each phase, and a turn counter. Two
+  bottom-left tap zones move the avatar left/right by
+  `MOVEMENT_STEP_ANGLE_DEGREES` (15°) per tap, spending one step; a
+  bottom-right "Pass" zone, visible only during `POST_SHOT`, ends that
+  phase early instead of using every remaining step. The post-shot budget
+  hitting zero also passes automatically. Passing always returns to
+  `PRE_SHOT` with a full budget and increments the turn counter - with no
+  opponent yet, this just starts a fresh turn for repeated testing rather
+  than handing off to anyone.
+- **`PlayScreen`'s `launchPoint`** (Phase 8's fixed `Vector2`) is now
+  refreshed from `avatarMovementController.position` every frame, instead
+  of being set once at construction. Both `SlingshotInputProcessor` and the
+  debug-overlay marker circle already held a reference to that same
+  `Vector2` instance, so updating its contents in place (`.set(...)`)
+  was enough to make aiming and the marker circle follow the avatar with no
+  changes needed in either of those - the marker circle doubles as the
+  avatar's visual position for now, there's no separate avatar sprite yet.
+- **Firing is gated on `canFire`** (true only during `PRE_SHOT`) -
+  `SlingshotInputProcessor`'s `onFire` callback now checks this before
+  spawning a missile, and calls `avatarMovementController.onFired()`
+  immediately after a shot actually launches, which is what transitions
+  `PRE_SHOT` into `POST_SHOT` with a fresh budget. A touch-and-release that
+  happens during `POST_SHOT` is silently ignored - no missile spawns, no
+  turn-state change.
+- `PlayScreen` draws the two move buttons (always) and the Pass button
+  (only during `POST_SHOT`) at the bottom corners, plus a
+  "Turn N - Pre-shot: X left" / "Turn N - Post-shot: X left" readout just
+  below the existing "Missile Y" line, top-left.
+- Deliberately NOT yet included: any AI/second character to actually pass
+  the turn *to*, health/damage on a hit, and a real avatar sprite (still
+  the same cyan marker circle Phase 8 introduced for the launch point) -
+  all future work once this mechanic itself is confirmed to feel right.
+
+**First on-device test result: the counterclockwise ("<") move button did
+nothing, while clockwise ("&gt;") worked correctly** (budget countdown, firing
+gate, post-shot movement, turn hand-off - the whole cycle worked once
+using only the working button). Root cause: the "<" button sat only 16px
+in from the screen's left edge - squarely inside Android's left-edge
+back-gesture zone, which intercepts touches there before the app ever
+receives them. The "&gt;" button, ~190px further in, happened to clear that
+zone by luck. **Fix:** `AvatarMovementController.MARGIN_REFERENCE_PX`
+bumped from 16 to 140 - pushes both move buttons well clear of the edge
+gesture zone (the top-right gravity-tuning buttons never had this problem
+since they're nowhere near a gesture-heavy edge). Not yet re-confirmed
+on-device.
+- **That fix (bigger margin) turned out not to be the real bug** - on
+  re-test, a DIFFERENT button was found broken (the more-central one, not
+  the corner one), and Logcat diagnostics (added temporarily to
+  [AvatarMovementController.touchDown]) showed taps landing entirely
+  outside every button's real hit-test rectangle, offset rightward by a
+  consistent amount - not an edge-gesture problem at all.
+- **Actual root cause, found via that Logcat data plus device info (Fold 8,
+  unfolded, held in portrait - a much wider-than-9:16 aspect ratio than any
+  earlier test device):** `PlayScreen`'s world camera uses a `FitViewport`
+  locked to `WORLD_WIDTH:WORLD_HEIGHT` (9:16). On a screen much wider than
+  that ratio, `FitViewport` letterboxes - it shrinks/centers its OpenGL
+  viewport rather than using the full screen. `render()` never reset the
+  GL viewport back to full-screen before drawing the HUD layer (buttons,
+  text, all positioned via the separate full-screen [hudCamera]) - so
+  every HUD element was actually being drawn compressed into that
+  narrower letterboxed strip, while Android reports touch coordinates in
+  true full-screen space. Result: HUD elements visually offset from where
+  they were tappable, by an amount that grows with how far the device's
+  aspect ratio departs from 9:16 - explaining why this never showed up in
+  Phase 7/8 testing (presumably done on a narrower screen with little or
+  no letterboxing) and only appeared now, on the Fold's much-wider main
+  screen.
+- **Fix:** `PlayScreen.render()` now calls `viewport.apply()` right before
+  world-space rendering (guarantees the world's letterboxed rectangle is
+  active for it specifically) and `Gdx.gl.glViewport(0, 0, Gdx.graphics
+  .width, Gdx.graphics.height)` right before any HUD-space rendering
+  (`renderHud`/`renderGravityDebugControls`/`renderMovementControls`) -
+  resetting to the true full screen so HUD elements render exactly where
+  they're hit-tested, regardless of the world viewport's letterboxing.
+  This affects every HUD element on this screen (movement buttons, the
+  gravity-tuning buttons, all HUD text), not just Phase 9's new controls -
+  the gravity buttons likely only ever "worked" by coincidence, on a
+  test device/orientation close enough to 9:16 that the letterboxing
+  offset was small enough to still land inside a generously-sized button.
+- The temporary Logcat diagnostics added to
+  `AvatarMovementController.touchDown` for this investigation have been
+  removed now that the viewport fix is confirmed on-device.
+- **Confirmed on-device (post-fix): both move buttons, the pre-shot/post-
+  shot budget countdown, firing gated to pre-shot only, the Pass button,
+  and the turn counter advancing all work correctly.**
+- **Known testing-only artifact, left as-is for now (Boo's call):** with
+  no AI opponent yet, "turn passes" just resets your own budget instead of
+  handing off to anyone - so a post-shot budget hitting zero immediately
+  opens a new turn's pre-shot budget, letting you take what feels like 10
+  steps in a row before firing again. Once a real opponent exists, its
+  entire turn (move/shoot/move) happens in between, naturally separating
+  those two budgets with real game state changing in between - nothing to
+  fix here now, this goes away on its own once squads/AI are built.
+- **Status: ✅ DONE - confirmed on-device**, including the viewport/
+  letterboxing fix above (which also affects every other HUD element on
+  this screen, not just Phase 9's controls - see that entry).
+
+### How to test Phase 9 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Same scene as Phase 8 (star, two planets), but the cyan
+   marker circle should now sit at the *top* of the launch (left) planet
+   rather than fixed just above it.
+3. Bottom-left corner: two buttons, "<" and ">". Tapping them should move
+   the cyan marker around the launch planet's surface, one visible step
+   per tap - "<" one direction, ">" the other.
+4. Top-left, below "Missile Y": a readout reading "Turn 1 - Pre-shot: 5
+   left", counting down by 1 each time you tap a move button. After 5 taps
+   it should stop decreasing (movement no longer does anything) - confirms
+   the pre-shot budget cap.
+5. Aim and fire a shot as in Phase 8 (drag from the marker, release). The
+   readout should immediately switch to "Turn 1 - Post-shot: 5 left", and
+   a bottom-right "Pass" button should appear. Move buttons should work
+   again, counting the post-shot budget down the same way.
+6. Try firing again mid-post-shot (drag from the marker and release) -
+   nothing should launch (firing is disabled outside the pre-shot phase).
+7. Either use all 5 post-shot steps, or tap "Pass" early - either way the
+   readout should reset to "Turn 2 - Pre-shot: 5 left", the "Pass" button
+   should disappear, and you should be able to move and fire again exactly
+   as in turn 1.
+8. Confirm the marker (and therefore where a shot launches from/the aim
+   line's anchor point) visibly moves with the avatar - fire a shot from a
+   couple of different positions around the planet and confirm the launch
+   point matches wherever the marker currently is, not the original Phase
+   8 fixed spot.
+9. If movement feels too fast/slow per tap, the arc feels wrong (e.g. steps
+   look uneven in size), or the turn hand-off timing feels off in some
+   way, tell me what it looked/felt like - `MOVEMENT_STEPS_PER_PHASE` and
+   `MOVEMENT_STEP_ANGLE_DEGREES` are easy to retune once I know which
+   direction it's off in.
+
 ### How to test the gravity-well milestone on-device
 
 1. Sync Gradle, build and run as usual.
