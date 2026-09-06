@@ -965,6 +965,95 @@ carries it.
    .TARGET_MAX_HP` are easy to retune once I know which direction it's
    off in.
 
+## Phase 11: mutable celestial-body mass
+
+**Status: ✅ DONE - confirmed on-device.** Implements the other half of
+"Core gameplay loop" above (Phase 10 did character health; this does
+celestial-body mass): chipping away a body's mass measurably weakens its
+gravity well in real time, and reducing it to zero destroys the body
+entirely - same deliberately-minimal scoping as every phase before it.
+
+- **`GravitySourceComponent.mass` is now mutable.** Was a `val` set once at
+  construction; now a private-set `var` with its own `applyDamage(amount)`
+  (clamps at zero) and `isDestroyed` check, mirroring `HealthComponent`'s
+  shape. `GravitySystem.applyForces()` already read `mass` fresh every
+  physics tick (no change needed there) - so a hit's effect on gravity is
+  immediate, including on an already-in-flight missile, same as the
+  existing gravity-multiplier debug tool.
+- **New `isDamageable` flag** on `GravitySourceComponent` (defaults `true`)
+  so a source can opt out. The star opts out (`isDamageable = false`) -
+  every design conversation about this mechanic has been about
+  planets/moons specifically, and making the star destructible this early
+  would remove the scene's only reliable gravity anchor without any
+  design decision behind it yet.
+- **Only the target planet is tagged `GravitySourceComponent` this phase**
+  (`TARGET_PLANET_MASS` = 2, much weaker than the star's 9) - the launch
+  planet is deliberately left as a plain non-gravity body, same Phase 8
+  simplification as before, to keep the number of new gravity sources Boo
+  is feeling out at once to just one. Every celestial body is still
+  confirmed to eventually pull - this is a rollout order, not a final
+  design line.
+- **`ProjectileContactListener` now dispatches by whichever component the
+  thing hit actually carries:** a `HealthComponent` (a character) takes
+  `MISSILE_DAMAGE` off its HP, same as Phase 10; a `GravitySourceComponent`
+  (a planet) takes `CELESTIAL_MASS_DAMAGE` (0.5, illustrative - 4 hits to
+  destroy the 2-mass target planet, matching the character target's own
+  "4 hits to defeat") off its mass, skipped entirely if `isDamageable` is
+  false. A hit on neither (nothing right now, but future non-gravity
+  celestial bodies) just removes the projectile, same as Phase 8. On mass
+  reaching zero, the planet's entity/body is queued for removal through
+  the exact same deferred pipeline as a spent projectile or a defeated
+  character - **destroying a celestial body removes it and its gravity
+  well entirely**, not just zeroes out its pull, matching Boo's explicit
+  confirmation earlier in this doc.
+- New fourth HUD line, top-left: "Target Planet Mass: 2.0", ticking down
+  per hit, switching to "Target Planet: DESTROYED" once it's gone.
+- **Still genuinely open (unchanged from the "Core gameplay loop" entry):**
+  whether a damaged celestial body visibly shrinks as its mass drops -
+  this phase deliberately keeps the visual radius fixed and only changes
+  the internal mass value, the simpler of the two options, so the
+  shrinking question can be answered later without having to undo
+  anything here.
+- Deliberately NOT yet included: the launch planet or the star taking
+  damage, collateral/splash damage from a miss, moons/exotic bodies (no
+  other celestial bodies exist yet to apply this to), and any visual cue
+  besides the HUD number that a planet is losing mass (no crater/scarring
+  effect, no radius change) - all future work.
+
+### How to test Phase 11 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Same scene as Phase 10. Watch a missile's flight path near
+   the target (right) planet now - it should curve slightly toward that
+   planet too, not just the star (subtle, since its mass is much smaller
+   than the star's - don't expect a dramatic effect).
+3. Top-left, fourth line (below Target HP): "Target Planet Mass: 2.0".
+4. Fire a shot that hits the target PLANET itself (not the small target
+   character circle above it - aim slightly lower/into the planet's body).
+   The mass readout should drop to "1.5", and Logcat (tag
+   `ProjectileContactListener`) should show a "Celestial body hit - mass
+   now 1.5" line.
+5. Keep landing hits on the planet. After the 4th hit, the mass readout
+   should read "Target Planet: DESTROYED", the planet's circle should
+   disappear from the debug wireframe view entirely, and Logcat should
+   show a "Celestial body destroyed - gravity well removed" line. (The
+   small target-character circle that was sitting above it will still be
+   there, now visually floating with no planet under it - a known
+   cosmetic gap, not a bug, since that circle isn't attached to the
+   planet's body.)
+6. After destruction, fire another shot that passes near where the planet
+   used to be - it should no longer curve toward that spot at all, only
+   toward the star (and, if still present, toward the target character's
+   `HealthComponent` hit only affecting its own HP as before).
+7. Confirm hitting the target CHARACTER (Phase 10's small circle) still
+   only reduces Target HP, not the planet's mass, and vice versa - the two
+   damage types shouldn't cross-apply.
+8. If the planet's gravity pull feels too strong/weak relative to the
+   star, or the mass-to-hits ratio feels off, tell me what it looked/felt
+   like - `TARGET_PLANET_MASS` (PlayScreen) and `CELESTIAL_MASS_DAMAGE`
+   (ProjectileContactListener) are easy to retune once I know which
+   direction it's off in.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

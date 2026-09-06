@@ -20,8 +20,29 @@ class DraggableComponent : Component
  * gravity source is expected to be, so it doesn't itself get pulled around)
  * always reports zero mass in Box2D, since static bodies are immovable by
  * definition - there's no physical mass for [GravitySystem] to read off it.
+ *
+ * **Phase 11: mass is mutable.** [applyDamage] is what
+ * [ProjectileContactListener] calls when a missile strikes a celestial body
+ * instead of a character - see PROJECT_STATE.md's "Core gameplay loop"
+ * entry: chipping away a body's mass measurably weakens its gravity well in
+ * real time, since [GravitySystem.applyForces] reads [mass] fresh every
+ * physics tick, and reducing it to zero ([isDestroyed]) removes the well
+ * (and, per that entry, the body itself) entirely. [isDamageable] lets a
+ * source opt out of this - the star does, for now (see
+ * [PlayScreen.createStar]'s call site) - rather than making every gravity
+ * source destructible by default; every design conversation about this
+ * mechanic so far has been about planets/moons specifically, not the star.
  */
-class GravitySourceComponent(val mass: Float) : Component
+class GravitySourceComponent(initialMass: Float, val isDamageable: Boolean = true) : Component {
+    var mass: Float = initialMass
+        private set
+
+    fun applyDamage(amount: Float) {
+        mass = (mass - amount).coerceAtLeast(0f)
+    }
+
+    val isDestroyed: Boolean get() = mass <= 0f
+}
 
 /**
  * Marker/tag component: entities with this get pulled toward every

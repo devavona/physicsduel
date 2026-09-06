@@ -61,6 +61,14 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * and wires [ProjectileContactListener] to actually apply damage on a hit
  * instead of only detecting one. See PROJECT_STATE.md's "Phase 10" entry.
  *
+ * **Phase 11 milestone: mutable celestial-body mass.** The target planet
+ * (only the target one, for now - see PROJECT_STATE.md's "Phase 11" entry)
+ * is now tagged [GravitySourceComponent] with a mutable mass a hit can chip
+ * away at, so it actually pulls things and that pull measurably weakens as
+ * it takes damage, down to being destroyed entirely. The launch planet and
+ * the star are unchanged (the star opts out of being damaged at all - see
+ * [createStar]).
+ *
  * [DragInputProcessor] is no longer wired up here - nothing in this
  * milestone's scene is tagged [DraggableComponent] anymore, since the demo
  * body it used to drag is gone. The class itself is untouched and stays in
@@ -96,6 +104,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // .MISSILE_DAMAGE) means 4 direct hits to defeat it.
         private const val TARGET_RADIUS = 0.3f
         private const val TARGET_MAX_HP = 100
+
+        // Phase 11 - illustrative, not tuned. Deliberately much smaller
+        // than STAR_MASS (9f): an ordinary planet should pull noticeably
+        // weaker than the star, not compete with it. Paired with
+        // ProjectileContactListener.CELESTIAL_MASS_DAMAGE (0.5f) for the
+        // same illustrative "4 hits to destroy" as the character target.
+        private const val TARGET_PLANET_MASS = 2f
 
         // Launch/target planets sit at the same height, star above and
         // between them - a straight-line shot passes well below the star, so
@@ -159,8 +174,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val hudBatch = SpriteBatch()
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
     private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
+    private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
     private val gravityAffectedFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
     private val healthFamily = Family.all(HealthComponent::class.java, PhysicsBodyComponent::class.java).get()
+
+    // A direct reference, not a family query, because the star also carries
+    // GravitySourceComponent now - a family query alone couldn't tell the
+    // HUD which one to read. Kept even after the entity is removed from the
+    // engine (on destruction) so renderTargetPlanetHud can still read its
+    // final mass/isDestroyed state - see that method.
+    private lateinit var targetPlanetEntity: Entity
 
     init {
         Box2D.init()
@@ -190,17 +213,24 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         engine.addEntity(
             Entity().apply {
                 add(PhysicsBodyComponent(star))
-                add(GravitySourceComponent(mass = STAR_MASS))
+                add(GravitySourceComponent(initialMass = STAR_MASS, isDamageable = false))
             }
         )
 
-        // Deliberately NOT tagged GravitySourceComponent - Phase 8's scope
-        // keeps the star as the only thing that pulls, even though every
-        // celestial body is confirmed to eventually exert gravity (see
-        // PROJECT_STATE.md). Plain static bodies for now, not added to the
-        // ECS at all - nothing about them needs an Ashley query yet.
+        // Launch planet deliberately unchanged since Phase 8 - still a
+        // plain non-gravity static Box2D body, not added to the ECS at all
+        // (nothing about it needs an Ashley query). Only the target planet
+        // below gets Phase 11's mutable-mass/gravity treatment this phase,
+        // to keep the number of new gravity sources Boo is feeling out at
+        // once to just one - see PROJECT_STATE.md's "Phase 11" entry. Every
+        // celestial body is confirmed to eventually exert gravity, this is
+        // just an incremental rollout, not a final design line.
         createPlanet(LAUNCH_PLANET_X, PLANETS_Y)
-        createPlanet(TARGET_PLANET_X, PLANETS_Y)
+        targetPlanetEntity = Entity().apply {
+            add(PhysicsBodyComponent(createPlanet(TARGET_PLANET_X, PLANETS_Y)))
+            add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
+        }
+        engine.addEntity(targetPlanetEntity)
 
         engine.addEntity(
             Entity().apply {
@@ -401,6 +431,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderGravityDebugControls()
         renderMovementControls()
         renderTargetHud()
+        renderTargetPlanetHud()
     }
 
     /**
@@ -550,6 +581,25 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val margin = HudFont.scaled(16f)
         val thirdLineY = Gdx.graphics.height - margin - HudFont.scaled(120f) // below renderHud's and renderMovementControls' lines
         HudFont.font.draw(hudBatch, text, margin, thirdLineY)
+        hudBatch.end()
+    }
+
+    /**
+     * Fourth HUD line, top-left: the Phase 11 target planet's remaining
+     * mass, or "DESTROYED" once it's been chipped down to zero. Reads
+     * [targetPlanetEntity] directly (not a family query - see that field's
+     * doc comment) since [gravitySourceMapper] would otherwise have no way
+     * to tell this planet apart from the star, which now also carries
+     * [GravitySourceComponent].
+     */
+    private fun renderTargetPlanetHud() {
+        val source = gravitySourceMapper.get(targetPlanetEntity)
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val text = if (source.isDestroyed) "Target Planet: DESTROYED" else "Target Planet Mass: %.1f".format(source.mass)
+        val margin = HudFont.scaled(16f)
+        val fourthLineY = Gdx.graphics.height - margin - HudFont.scaled(180f) // below renderTargetHud's line
+        HudFont.font.draw(hudBatch, text, margin, fourthLineY)
         hudBatch.end()
     }
 
