@@ -13,6 +13,7 @@ import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.GL20
 import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.Texture
+import com.badlogic.gdx.graphics.g2d.NinePatch
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import com.badlogic.gdx.math.Rectangle
@@ -26,6 +27,7 @@ import com.badlogic.gdx.physics.box2d.FixtureDef
 import com.badlogic.gdx.physics.box2d.World
 import com.badlogic.gdx.utils.viewport.FitViewport
 import com.badlogic.gdx.utils.viewport.Viewport
+import kotlin.random.Random
 
 /**
  * The physics playground itself (originally Phases 2-4's falling-circle
@@ -261,6 +263,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // unreasonably fast shot.
         private const val PULL_POWER_SCALE = 4f
         private const val MAX_MISSILE_SPEED = 15f
+
+        // Phase 19c - UI visual pass. Star count deliberately modest -
+        // "doesn't overwhelm what we have so far" (Boo, explicit).
+        private const val STARFIELD_STAR_COUNT = 70
+
+        // Shared between renderStatsPanel (row height) and drawStatBar
+        // (bar position) so they can't drift out of sync with each other
+        // the way the old hardcoded 70f/22f pair silently did.
+        private const val STATS_BAR_HEIGHT = 10f
+        private const val STATS_BAR_GAP_BELOW_TEXT = 8f
+        private const val STATS_ROW_GAP = 16f
     }
 
     private lateinit var camera: OrthographicCamera
@@ -344,6 +357,70 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val planetTargetTexture = Texture(Gdx.files.internal("textures/planet_target.png")).apply {
         setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
     }
+    // Phase 19 - shaded sphere art for the player avatar (blue) and AI
+    // target (red), drawn at their live positions each frame (unlike the
+    // Phase 18 star/planets, these move) - see renderCharacterSprites.
+    private val avatarPlayerTexture = Texture(Gdx.files.internal("textures/avatar_player.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    private val avatarAiTexture = Texture(Gdx.files.internal("textures/avatar_ai.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    // Phase 19b - missile sprite art, a soft violet/amethyst chosen to
+    // contrast the blue player/red AI spheres and the orange/teal planets
+    // without clashing (Boo, explicit: "contrasting color that is not
+    // harsh"). Reuses trailFamily below to find every in-flight missile -
+    // every missile entity is already TrailComponent-tagged (Phase 15/16),
+    // so no new Family/mapper is needed just for this.
+    private val missileTexture = Texture(Gdx.files.internal("textures/missile.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    // Phase 19c - UI visual pass: real "game button" art (neutral grey,
+    // beveled), a small graphical stats panel, and a muted starfield
+    // backdrop. See PROJECT_STATE.md's Phase 19c entry for the full
+    // design-language decisions - why NinePatch (clean stretch to any
+    // button/panel size without distorting the rounded corners) and why
+    // these specific colors.
+    private val buttonTexture = Texture(Gdx.files.internal("textures/button.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    private val buttonPatch = NinePatch(buttonTexture, 16, 16, 16, 16)
+    private val panelTexture = Texture(Gdx.files.internal("textures/panel.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    private val panelPatch = NinePatch(panelTexture, 16, 16, 16, 16)
+    private val barPillTexture = Texture(Gdx.files.internal("textures/bar_pill.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    // top/bottom margin 0 is safe here - drawStatBar always draws this at
+    // its native pixel height (see barHeight there), so no vertical
+    // stretch actually occurs regardless of what the patch allows.
+    private val barPillPatch = NinePatch(barPillTexture, 8, 8, 0, 0)
+    private val playerBarColor = Color(0.30f, 0.55f, 0.92f, 1f) // matches avatar_player.png's base hue
+    private val aiBarColor = Color(0.85f, 0.25f, 0.25f, 1f) // matches avatar_ai.png's base hue
+    private val massBarColor = Color(0.80f, 0.58f, 0.30f, 1f) // distinct from either character color
+    private val barTrackColor = Color(0.16f, 0.17f, 0.22f, 1f)
+
+    /** One decorative background star - see [starfieldStars]. */
+    private class StarfieldStar(val x: Float, val y: Float, val radius: Float, val color: Color)
+
+    // Phase 19c - generated once (not per-game), fixed for this screen's
+    // lifetime. Deliberately muted: brightness is capped well below full
+    // white and radii stay small, so this reads as a backdrop rather than
+    // competing with the sprites/HUD drawn on top of it.
+    private val starfieldStars: List<StarfieldStar> = buildList {
+        repeat(STARFIELD_STAR_COUNT) {
+            val brightness = 0.30f + Random.nextFloat() * 0.40f
+            add(
+                StarfieldStar(
+                    x = Random.nextFloat() * WORLD_WIDTH,
+                    y = Random.nextFloat() * WORLD_HEIGHT,
+                    radius = 0.012f + Random.nextFloat() * 0.028f,
+                    color = Color(brightness, brightness, (brightness * 1.08f).coerceAtMost(1f), 1f)
+                )
+            )
+        }
+    }
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
     private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
     private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
@@ -353,7 +430,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // A direct reference, not a family query, because the star also carries
     // GravitySourceComponent now - a family query alone couldn't tell the
     // HUD which one to read. Kept even after the entity is removed from the
-    // engine (on destruction) so renderTargetPlanetHud can still read its
+    // engine (on destruction) so renderStatsPanel can still read its
     // final mass/isDestroyed state - see that method.
     private lateinit var targetPlanetEntity: Entity
 
@@ -711,7 +788,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // to.
         viewport.apply()
         camera.update()
+        renderStarfield()
         renderCelestialSprites()
+        renderCharacterSprites()
+        renderMissileSprites()
         debugRenderer.render(world, camera.combined)
         renderDebugOverlay()
         renderAimTrajectoryPreview()
@@ -735,9 +815,24 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderGravityDebugControls()
         renderShotSpeedDebugControls()
         renderMovementControls()
-        renderTargetHud()
-        renderTargetPlanetHud()
-        renderPlayerHud()
+        renderStatsPanel()
+    }
+
+    /**
+     * Phase 19c - a muted decorative starfield behind everything else.
+     * Drawn in world space (same camera as every other world-space
+     * element) before any sprite, so it always sits at the very back.
+     * See [starfieldStars] for why it's generated once and kept
+     * deliberately dim/small rather than regenerated or made brighter.
+     */
+    private fun renderStarfield() {
+        shapeRenderer.projectionMatrix = camera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        for (star in starfieldStars) {
+            shapeRenderer.color = star.color
+            shapeRenderer.circle(star.x, star.y, star.radius, 8)
+        }
+        shapeRenderer.end()
     }
 
     /**
@@ -758,6 +853,48 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val planetDiameter = PLANET_RADIUS * 2f
         worldBatch.draw(planetLaunchTexture, LAUNCH_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
         worldBatch.draw(planetTargetTexture, TARGET_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
+        worldBatch.end()
+    }
+
+    /**
+     * Phase 19 - shaded sphere art for the player avatar and AI target,
+     * drawn at their live logical positions each frame (avatarMovementController
+     * .position / aiTurnController.position - the same source of truth
+     * [render] already uses to sync avatarBody/targetCharacterBody's real
+     * Box2D transforms). Sized to each one's own real fixture diameter
+     * (AVATAR_RADIUS vs TARGET_RADIUS - deliberately different sizes,
+     * unchanged from Phase 10/13), same wireframe-stays-on-top approach as
+     * Phase 18 for this pass.
+     */
+    private fun renderCharacterSprites() {
+        worldBatch.projectionMatrix = camera.combined
+        worldBatch.begin()
+        val avatarDiameter = AVATAR_RADIUS * 2f
+        val avatarPos = avatarMovementController.position
+        worldBatch.draw(avatarPlayerTexture, avatarPos.x - AVATAR_RADIUS, avatarPos.y - AVATAR_RADIUS, avatarDiameter, avatarDiameter)
+        val aiDiameter = TARGET_RADIUS * 2f
+        val aiPos = aiTurnController.position
+        worldBatch.draw(avatarAiTexture, aiPos.x - TARGET_RADIUS, aiPos.y - TARGET_RADIUS, aiDiameter, aiDiameter)
+        worldBatch.end()
+    }
+
+    /**
+     * Phase 19b - missile sprite art. Iterates [trailFamily] (every
+     * in-flight missile is already TrailComponent-tagged, see
+     * fireMissile) rather than a dedicated projectile family/mapper -
+     * one less thing to keep in sync. Drawn every frame at each missile's
+     * real, current Box2D position (physicsBodyMapper.get(entity).body
+     * .position) - not a cached/interpolated value - same live-position
+     * approach as renderCharacterSprites.
+     */
+    private fun renderMissileSprites() {
+        worldBatch.projectionMatrix = camera.combined
+        worldBatch.begin()
+        val missileDiameter = MISSILE_RADIUS * 2f
+        for (entity in engine.getEntitiesFor(trailFamily)) {
+            val position = physicsBodyMapper.get(entity).body.position
+            worldBatch.draw(missileTexture, position.x - MISSILE_RADIUS, position.y - MISSILE_RADIUS, missileDiameter, missileDiameter)
+        }
         worldBatch.end()
     }
 
@@ -891,15 +1028,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val minusRect = gravityDebugController.minusButtonRect
         val plusRect = gravityDebugController.plusButtonRect
 
-        shapeRenderer.projectionMatrix = hudCamera.combined
-        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color(0.25f, 0.25f, 0.32f, 1f)
-        shapeRenderer.rect(minusRect.x, minusRect.y, minusRect.width, minusRect.height)
-        shapeRenderer.rect(plusRect.x, plusRect.y, plusRect.width, plusRect.height)
-        shapeRenderer.end()
-
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
+        buttonPatch.draw(hudBatch, minusRect.x, minusRect.y, minusRect.width, minusRect.height)
+        buttonPatch.draw(hudBatch, plusRect.x, plusRect.y, plusRect.width, plusRect.height)
         val minusLabel = "-"
         HudFont.font.draw(
             hudBatch, minusLabel,
@@ -932,15 +1064,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val minusRect = shotSpeedDebugController.minusButtonRect
         val plusRect = shotSpeedDebugController.plusButtonRect
 
-        shapeRenderer.projectionMatrix = hudCamera.combined
-        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color(0.25f, 0.25f, 0.32f, 1f)
-        shapeRenderer.rect(minusRect.x, minusRect.y, minusRect.width, minusRect.height)
-        shapeRenderer.rect(plusRect.x, plusRect.y, plusRect.width, plusRect.height)
-        shapeRenderer.end()
-
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
+        buttonPatch.draw(hudBatch, minusRect.x, minusRect.y, minusRect.width, minusRect.height)
+        buttonPatch.draw(hudBatch, plusRect.x, plusRect.y, plusRect.width, plusRect.height)
         val minusLabel = "-"
         HudFont.font.draw(
             hudBatch, minusLabel,
@@ -975,36 +1102,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val rightRect = avatarMovementController.rightButtonRect
         val showPassButton = avatarMovementController.phase == AvatarMovementController.Phase.POST_SHOT
 
-        shapeRenderer.projectionMatrix = hudCamera.combined
-        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color(0.25f, 0.25f, 0.32f, 1f)
-        shapeRenderer.rect(leftRect.x, leftRect.y, leftRect.width, leftRect.height)
-        shapeRenderer.rect(rightRect.x, rightRect.y, rightRect.width, rightRect.height)
-        if (showPassButton) {
-            val passRect = avatarMovementController.passButtonRect
-            shapeRenderer.rect(passRect.x, passRect.y, passRect.width, passRect.height)
-        }
-        shapeRenderer.end()
-
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
+        buttonPatch.draw(hudBatch, leftRect.x, leftRect.y, leftRect.width, leftRect.height)
+        buttonPatch.draw(hudBatch, rightRect.x, rightRect.y, rightRect.width, rightRect.height)
+        if (showPassButton) {
+            val passRect = avatarMovementController.passButtonRect
+            buttonPatch.draw(hudBatch, passRect.x, passRect.y, passRect.width, passRect.height)
+        }
         drawCenteredLabel("<", leftRect)
         drawCenteredLabel(">", rightRect)
         if (showPassButton) {
             drawCenteredLabel("Pass", avatarMovementController.passButtonRect)
         }
-
-        val turnLabel = if (aiTurnController.isTurnActive) {
-            "Turn ${avatarMovementController.turnNumber} - AI's turn..."
-        } else {
-            val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"
-            "Turn %d - %s: %d left".format(
-                avatarMovementController.turnNumber, phaseLabel, avatarMovementController.stepsRemaining
-            )
-        }
-        val margin = HudFont.scaled(16f)
-        val secondLineY = Gdx.graphics.height - margin - HudFont.scaled(60f) // below renderHud's "Missile Y" line
-        HudFont.font.draw(hudBatch, turnLabel, margin, secondLineY)
         hudBatch.end()
     }
 
@@ -1018,65 +1128,130 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Third HUD line, top-left (below "Missile Y" and the turn/phase
-     * readout): the Phase 10 target's remaining HP, or "DEFEATED" once its
-     * HealthComponent (still readable after removal - see
-     * [renderTargetPlanetHud]'s doc comment for why) hits zero. Reads
-     * [targetCharacterEntity] directly, not a family query - Phase 13 gave
-     * the player's avatar a [HealthComponent] too, so a family query alone
-     * couldn't tell the two apart any more than [gravitySourceMapper]
-     * could tell the target planet from the star.
+     * Phase 19c - a single small graphical HUD panel (turn/phase, player
+     * HP, target HP, target planet mass), replacing the three separate
+     * plain-text lines those used to be (renderTargetHud/
+     * renderTargetPlanetHud/renderPlayerHud) plus renderMovementControls'
+     * old turn-line text. Boo, explicit: "make it a small HUD that
+     * graphically matches the rest of the design language so far" -
+     * reuses [panelPatch] (same rounded-rect/bordered look as the new
+     * button art) as a backdrop, and [barPillPatch] tinted per-stat
+     * ([playerBarColor]/[aiBarColor] matching the Phase 19 avatar sprite
+     * colors, [massBarColor] distinct from either character) for the
+     * three numeric bars. Positioned just below [renderHud]'s "Missile Y"
+     * debug line, which is left alone - that one's pure debug info, not
+     * part of what Boo asked to redesign here.
      */
-    private fun renderTargetHud() {
-        val targetHealth = healthMapper.get(targetCharacterEntity)
-        hudBatch.projectionMatrix = hudCamera.combined
-        hudBatch.begin()
-        val text = if (targetHealth.isDefeated) "Target: DEFEATED" else "Target HP: %d/%d".format(targetHealth.currentHp, targetHealth.maxHp)
+    private fun renderStatsPanel() {
+        // Content is measured BEFORE anything is drawn, and the panel is
+        // sized to whatever that content actually needs - a third bug
+        // from the same on-device round as the two above: panelWidth used
+        // to be another guessed constant (320f) that didn't account for
+        // how long the turn/phase text can actually get ("Turn 12 -
+        // Post-shot: 5 left" is much wider than "Turn 1 - Pre-shot: 0
+        // left"), so text routinely ran past the panel's right edge
+        // instead of wrapping or the panel just being wide enough. Same
+        // underlying lesson as the row-height/bar-position fixes above:
+        // measure the real content instead of hardcoding a pixel guess.
         val margin = HudFont.scaled(16f)
-        val thirdLineY = Gdx.graphics.height - margin - HudFont.scaled(120f) // below renderHud's and renderMovementControls' lines
-        HudFont.font.draw(hudBatch, text, margin, thirdLineY)
-        hudBatch.end()
-    }
+        val panelPadding = HudFont.scaled(12f)
+        val labelValueGap = HudFont.scaled(16f)
+        val minContentWidth = HudFont.scaled(220f)
 
-    /**
-     * Fourth HUD line, top-left: the Phase 11 target planet's remaining
-     * mass, or "DESTROYED" once it's been chipped down to zero. Reads
-     * [targetPlanetEntity] directly (not a family query) since
-     * [gravitySourceMapper] would otherwise have no way to tell this
-     * planet apart from the star, which now also carries
-     * [GravitySourceComponent]. Ashley's plain (non-pooled) `Engine`
-     * doesn't clear a removed entity's components, just detaches it from
-     * families/systems - so reading straight from the entity, even after
-     * [ProjectileContactListener.flushRemovals] has removed it, still
-     * correctly reflects its final state instead of throwing or going
-     * stale.
-     */
-    private fun renderTargetPlanetHud() {
-        val source = gravitySourceMapper.get(targetPlanetEntity)
-        hudBatch.projectionMatrix = hudCamera.combined
-        hudBatch.begin()
-        val text = if (source.isDestroyed) "Target Planet: DESTROYED" else "Target Planet Mass: %.1f".format(source.mass)
-        val margin = HudFont.scaled(16f)
-        val fourthLineY = Gdx.graphics.height - margin - HudFont.scaled(180f) // below renderTargetHud's line
-        HudFont.font.draw(hudBatch, text, margin, fourthLineY)
-        hudBatch.end()
-    }
+        val turnLabel = if (aiTurnController.isTurnActive) {
+            "Turn ${avatarMovementController.turnNumber} - AI's turn..."
+        } else {
+            val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"
+            "Turn %d - %s: %d left".format(
+                avatarMovementController.turnNumber, phaseLabel, avatarMovementController.stepsRemaining
+            )
+        }
 
-    /**
-     * Fifth HUD line, top-left: Phase 13's player HP - "Player: DEFEATED"
-     * once it hits zero. Reads [avatarEntity] directly for the same reason
-     * [renderTargetHud] reads [targetCharacterEntity] directly - two
-     * different entities now carry [HealthComponent].
-     */
-    private fun renderPlayerHud() {
         val playerHealth = healthMapper.get(avatarEntity)
+        val playerLabel = if (playerHealth.isDefeated) "Player: DEFEATED" else "Player HP"
+        val playerValue = "%d/%d".format(playerHealth.currentHp, playerHealth.maxHp)
+
+        val targetHealth = healthMapper.get(targetCharacterEntity)
+        val targetLabel = if (targetHealth.isDefeated) "Target: DEFEATED" else "Target HP"
+        val targetValue = "%d/%d".format(targetHealth.currentHp, targetHealth.maxHp)
+
+        // Ratio against GravitySourceComponent.initialMass (Phase 19c also
+        // adds that property) rather than an arbitrary scale - see
+        // Components.kt.
+        val targetSource = gravitySourceMapper.get(targetPlanetEntity)
+        val massLabel = if (targetSource.isDestroyed) "Target Planet: DESTROYED" else "Target Planet Mass"
+        val massValue = "%.1f".format(targetSource.mass)
+
+        val contentWidth = maxOf(
+            minContentWidth,
+            HudFont.widthOf(turnLabel),
+            HudFont.widthOf(playerLabel) + labelValueGap + HudFont.widthOf(playerValue),
+            HudFont.widthOf(targetLabel) + labelValueGap + HudFont.widthOf(targetValue),
+            HudFont.widthOf(massLabel) + labelValueGap + HudFont.widthOf(massValue)
+        )
+        val panelWidth = contentWidth + panelPadding * 2f
+
+        // Derived from the font's own real metrics instead of a guessed
+        // pixel count - see the doc comment on the companion object's
+        // STATS_* constants and PROJECT_STATE.md's Phase 19c entry.
+        val rowHeight = HudFont.font.lineHeight + HudFont.scaled(STATS_BAR_GAP_BELOW_TEXT) + HudFont.scaled(STATS_BAR_HEIGHT) + HudFont.scaled(STATS_ROW_GAP)
+        val panelHeight = panelPadding * 2f + rowHeight * 4
+        val panelTop = Gdx.graphics.height - HudFont.scaled(56f)
+        val panelX = margin
+        val panelY = panelTop - panelHeight
+
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
-        val text = if (playerHealth.isDefeated) "Player: DEFEATED" else "Player HP: %d/%d".format(playerHealth.currentHp, playerHealth.maxHp)
-        val margin = HudFont.scaled(16f)
-        val fifthLineY = Gdx.graphics.height - margin - HudFont.scaled(240f) // below renderTargetPlanetHud's line
-        HudFont.font.draw(hudBatch, text, margin, fifthLineY)
+        panelPatch.draw(hudBatch, panelX, panelY, panelWidth, panelHeight)
+
+        val contentX = panelX + panelPadding
+        var rowTop = panelY + panelHeight - panelPadding
+
+        HudFont.font.draw(hudBatch, turnLabel, contentX, rowTop)
+        rowTop -= rowHeight
+
+        drawStatBar(contentX, rowTop, contentWidth, playerLabel, playerValue, playerHealth.currentHp.toFloat() / playerHealth.maxHp.toFloat(), playerBarColor)
+        rowTop -= rowHeight
+
+        drawStatBar(contentX, rowTop, contentWidth, targetLabel, targetValue, targetHealth.currentHp.toFloat() / targetHealth.maxHp.toFloat(), aiBarColor)
+        rowTop -= rowHeight
+
+        drawStatBar(contentX, rowTop, contentWidth, massLabel, massValue, targetSource.mass / targetSource.initialMass, massBarColor)
+
         hudBatch.end()
+    }
+
+    /**
+     * One stat row for [renderStatsPanel]: a label/value text line with a
+     * small bar graphic underneath showing [ratio] (clamped to 0..1 here,
+     * even though HP/mass never actually go negative) filled in
+     * [fillColor] over a dark track. [barPillPatch] is shared across every
+     * row and both track/fill - NinePatch bakes its tint into its own
+     * vertex colors at [NinePatch.setColor] time (not the batch's current
+     * color), so it has to be set immediately before each draw call, not
+     * once up front.
+     */
+    private fun drawStatBar(x: Float, rowTop: Float, width: Float, label: String, valueText: String, ratio: Float, fillColor: Color) {
+        HudFont.font.draw(hudBatch, label, x, rowTop)
+        val valueWidth = HudFont.widthOf(valueText)
+        HudFont.font.draw(hudBatch, valueText, x + width - valueWidth, rowTop)
+
+        // rowTop is the TOP of the text (BitmapFont.draw's y convention),
+        // so the text's own rendered height (font.lineHeight) has to be
+        // cleared before the bar starts, or the bar draws through the
+        // middle of the glyphs instead of below them - exactly what
+        // happened with the old hardcoded 22f offset.
+        val barHeight = HudFont.scaled(STATS_BAR_HEIGHT)
+        val barY = rowTop - HudFont.font.lineHeight - HudFont.scaled(STATS_BAR_GAP_BELOW_TEXT)
+        val clampedRatio = ratio.coerceIn(0f, 1f)
+
+        barPillPatch.setColor(barTrackColor)
+        barPillPatch.draw(hudBatch, x, barY, width, barHeight)
+
+        if (clampedRatio > 0.02f) {
+            barPillPatch.setColor(fillColor)
+            barPillPatch.draw(hudBatch, x, barY, width * clampedRatio, barHeight)
+        }
     }
 
     override fun resize(width: Int, height: Int) {
@@ -1106,5 +1281,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         starTexture.dispose()
         planetLaunchTexture.dispose()
         planetTargetTexture.dispose()
+        avatarPlayerTexture.dispose()
+        avatarAiTexture.dispose()
+        missileTexture.dispose()
+        buttonTexture.dispose()
+        panelTexture.dispose()
+        barPillTexture.dispose()
     }
 }

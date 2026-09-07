@@ -623,9 +623,61 @@ session - none of this is built yet beyond what's noted):
   designed.
 
 **Still genuinely open:**
-- Whether a damaged celestial body visibly shrinks as its mass drops, or
-  keeps its visual size while only an internal mass value changes.
 - Trebuchet's actual weapon behavior - named but not yet designed.
+
+**Damage visual, decided (Sept 2026 session, "make it playable"):** craters/
+scorch marks overlaid at each hit location for now (planet keeps its
+visual size); true shrink-as-mass-drops is a deliberate follow-up, not
+done in the same pass - see Phase 21 below.
+
+## Campaign progression ladder - decided design (Sept 2026 session, "make it playable")
+
+Resolves "how does a session of play actually escalate," turning the
+tech-demo scene (fixed one-star-two-planet layout, no win/loss handling)
+into something with a real start/middle/end. Directly the "Level scaling"
+idea already sketched in "Core gameplay loop" above, now with concrete
+numbers Boo chose.
+
+- **Planet placement:** the star stays fixed at center; both planets are
+  randomly placed each new game (previously fixed `LAUNCH_PLANET_X`/
+  `TARGET_PLANET_X` constants - becomes randomized geometry, still
+  respecting whatever minimum-clearance-from-the-star/each-other rules
+  keep a game always winnable). See Phase 20 below.
+- **Progression counter: wins only, never reset by a loss.** A persistent
+  counter, saved via [SaveManager]/[GameSave] (same file Phase 6's
+  `runCount` already lives in - a new field, not a new save). Losing a
+  game costs nothing but the game itself; you can retry immediately at
+  the same difficulty tier. Explicitly NOT a roguelite streak - Boo was
+  direct that a win-streak-resets-on-loss mechanic is not wanted right
+  now.
+- **Escalation ladder**, keyed off that win counter:
+  - **Start:** 1 star (center), 1 planet per side, 1 character per side -
+    today's scene, minus the fixed layout.
+  - **5 wins:** the AI gets a second planet and a second character - a
+    deliberate asymmetric difficulty step (harder for the player first,
+    not a simultaneous both-sides addition).
+  - **20 wins:** the AI gets a third planet (presumably a third
+    character too, same one-character-per-planet pattern), AND the
+    player gets a second planet/character - the player catches up here.
+  - **30 wins:** campaign complete - a "reset progress to zero" option
+    appears, letting Boo replay the whole ladder from the start
+    on-demand rather than being stuck at the finished state.
+- **Not yet decided / deferred to whenever it's actually reached:** exact
+  squad composition/AI behavior once multiple characters exist per side
+  (turn-order question already flagged as open in "Core gameplay loop"
+  above - individual interleaved turns vs. whole-squad-then-whole-squad);
+  where new planets/characters get placed once there's more than one per
+  side (same randomization approach as the base 2-planet case,
+  presumably, but not designed in detail yet).
+- **Build order Boo confirmed:** avatar/AI sprite art (Phase 19, below)
+  → random planet placement (Phase 20) → planet damage visuals (Phase
+  21) → win/loss detection + "new game" option (Phase 22, first real use
+  of the existing but never-wired-up [GameOverScreen]) → this
+  progression ladder itself (Phase 23, builds on Phase 22's win/loss
+  tracking). Each one is its own on-device-testable phase, same
+  discipline as every phase so far - this section records the whole
+  plan up front so a future session doesn't have to re-derive it, not a
+  claim that Phases 20-23 are built yet.
 
 ## Phase 8: pull-and-release aiming + a gravity-curved projectile
 
@@ -1675,6 +1727,232 @@ and hand over the PNGs whenever.
    placeholders, tell me - either is a quick follow-up (regenerate the
    procedural script with different parameters, or swap in real PNG
    files at the same paths).
+
+## Phase 19: player/AI avatar sprite art
+
+**Status: Built, awaiting on-device test.** Second half of the "make it
+playable" visual pass - see "Campaign progression ladder" above for the
+full plan this is step one of. Same procedural-sphere approach as Phase
+18 (no network access to pull pre-made art, see that phase's writeup),
+tuned for a glossier "character token" look (added specular highlight,
+no craters) rather than the planets' matte cratered-rock look, so the
+two read as different kinds of objects at a glance, not just different
+colors.
+
+- **`android/src/main/assets/textures/`** - two new 128x128 RGBA PNGs,
+  `avatar_player.png` (blue) and `avatar_ai.png` (red), per Boo's
+  explicit color choice.
+- **`PlayScreen`** - two new `Texture` fields alongside Phase 18's
+  three, same linear-filtering setup. New `renderCharacterSprites()`
+  draws each at its **live** logical position every frame -
+  `avatarMovementController.position` for the player,
+  `aiTurnController.position` for the AI - the same source of truth
+  `render()` already uses to sync `avatarBody`/`targetCharacterBody`'s
+  real Box2D transforms, so the sprite can never drift from the real
+  hitbox. Sized to each side's own existing fixture radius
+  (`AVATAR_RADIUS` vs `TARGET_RADIUS` - deliberately different sizes,
+  unchanged from Phase 10/13, not something this phase touches). Called
+  right after `renderCelestialSprites()`, still before
+  `debugRenderer.render(...)` - same "wireframe stays visible on top for
+  alignment verification" approach as Phase 18, same reasoning.
+- Missiles/projectiles are NOT touched this phase - they stay plain
+  Box2D wireframe circles, per the narrow scope Boo confirmed when this
+  whole "make it playable" push was scoped.
+- Textures disposed in `PlayScreen.dispose()` alongside Phase 18's.
+
+### How to test Phase 19 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. The avatar (your launch-point marker) should now be a
+   glossy blue sphere, and the AI's target should be a glossy red sphere
+   - both with a visible wireframe circle still drawn right on top
+   (expected, alignment check, same as Phase 18's planets).
+3. Move the avatar around its planet (the "<"/">" buttons) - the blue
+   sphere should track exactly with the wireframe circle, no lag or
+   offset.
+4. Let a turn play out where the AI repositions itself (Phase 14) - the
+   red sphere should likewise track the AI's wireframe circle as it
+   moves, not just at its starting position.
+5. Confirm the star/planets from Phase 18 and everything else
+   (trajectory preview, flight trails, HUD) still look/behave exactly as
+   before - this phase only adds the two new sprites.
+6. If the colors, gloss/shine, or sizing feel off, tell me what you'd
+   change - same quick-regenerate-the-script or swap-in-real-art
+   follow-up path as Phase 18.
+
+**Phase 19b addendum: missile sprite art.** Boo asked for missiles to
+look like something too - "a smaller sphere, similar to the player
+spheres... a contrasting color that is not harsh." Chose a soft
+violet/amethyst - distinct from every color already on screen (blue
+player, red AI, orange/teal planets, warm star, navy background),
+pairs well with the existing orange flight trail (Phase 15) behind it.
+`android/src/main/assets/textures/missile.png` (96x96, same glossy-
+sphere generator as the avatars). `PlayScreen.renderMissileSprites()`
+deliberately reuses `trailFamily` (every in-flight missile is already
+`TrailComponent`-tagged, see `fireMissile`) instead of a dedicated
+projectile family/mapper - one less thing to keep in sync - and loops
+over every entity in it, since more than one missile can be in flight
+at once. Sized to the missile's real `MISSILE_RADIUS` fixture, drawn at
+its live Box2D position every frame. Called in `render()` after
+`renderCharacterSprites()`, still before `debugRenderer.render(...)`.
+**Status: Built, awaiting on-device test** (same test steps as above,
+plus: fire a shot and confirm the violet sphere tracks the missile
+exactly, with its orange trail visible behind it).
+
+## Phase 19c: UI visual pass (starfield, real buttons, graphical stats HUD)
+
+**Status: Built, awaiting on-device test.** Boo asked for three things in
+one go: a background starfield, tap-zone buttons that "look like real
+buttons in a game" (neutral grey, Boo's call - "grey is fine unless you
+have a better idea for now"), and the plain-text turn/HP/mass readouts
+turned into "a small HUD that graphically matches the rest of the design
+language." All three are pure rendering changes - no gameplay/physics
+logic touched.
+
+**Starfield.** `PlayScreen.starfieldStars` - a fixed list of
+`STARFIELD_STAR_COUNT` (70) small dim dots, generated once when the
+screen is created (not regenerated per game, not per frame), scattered
+randomly across the world bounds. Deliberately muted - brightness
+capped at 0.30-0.70 (never full white) and radii kept small (0.012-0.04
+world units) - so it reads as a backdrop, per Boo's explicit "doesn't
+overwhelm what we have so far." `renderStarfield()` draws them via
+`shapeRenderer` in world space, first thing every frame (before
+`renderCelestialSprites`), so it's always behind every sprite.
+
+**Real button art.** Three new procedurally-generated textures (same
+"no network access to pull pre-made art" situation as Phase 18/19 - see
+Phase 18's writeup):
+- `button.png` - a rounded rect with a top-lit/bottom-shadowed grey
+  gradient (a cheap fake bevel) and a darker border ring, for an
+  actual "pressable" look instead of Phase 8-17's flat single-color
+  rectangles.
+- `panel.png` - a flatter, darker, semi-opaque rounded rect for HUD
+  backgrounds - same rounded/bordered visual language as the button but
+  clearly not tappable.
+- `bar_pill.png` - a plain white rounded "pill" shape, meant to be
+  tinted at draw time rather than shipped as several separate colored
+  textures - `NinePatch.setColor(...)` right before each `.draw(...)`
+  call switches its tint (dark grey for a bar's track, then whatever
+  stat color for the fill drawn on top) - see `drawStatBar` below for
+  why this has to be `patch.setColor(...)`, not `batch.setColor(...)`
+  (NinePatch bakes its tint into its own cached vertex colors, not the
+  batch's current color state).
+- All three loaded as `Texture` + `NinePatch` (margins chosen safely
+  larger than each texture's corner radius, so the rounded corners never
+  stretch/distort regardless of the target button/panel size).
+  `renderGravityDebugControls`, `renderShotSpeedDebugControls`, and
+  `renderMovementControls` all swapped their `shapeRenderer.rect(...)`
+  background fill for `buttonPatch.draw(...)` - no change to any
+  button's actual hit-test rect/position logic, purely how the
+  background pixel gets drawn.
+
+**Graphical stats HUD.** The three separate plain-text HUD lines
+(`renderTargetHud`, `renderTargetPlanetHud`, `renderPlayerHud`) plus
+`renderMovementControls`' old turn/phase text line are gone, replaced
+by one `renderStatsPanel()` method: a `panelPatch` background box
+containing, top to bottom, the turn/phase readout (same text as
+before, just relocated) and three label+value+bar rows (shared
+`drawStatBar` helper) - player HP (blue, `playerBarColor`, matching
+`avatar_player.png`'s hue), target HP (red, `aiBarColor`, matching
+`avatar_ai.png`'s hue), and target planet mass (amber, `massBarColor`,
+deliberately distinct from either character's color). Each bar's fill
+width is its stat's live ratio (`currentHp / maxHp`, or
+`mass / initialMass` for the planet) against a dark track drawn the
+same way. The debug-only "Missile Y" line (`renderHud`) is untouched -
+that one's programmer info, not part of what Boo asked to redesign.
+- **`Components.kt`**: `GravitySourceComponent`'s constructor parameter
+  `initialMass` became a retained `val` property (was write-once,
+  discarded after seeding the mutable `mass` field) specifically so the
+  mass bar has an actual "full" value to compute a ratio against,
+  instead of an arbitrary hardcoded scale.
+
+### How to test Phase 19c on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. A subtle field of small dim dots should be visible
+   across the background - noticeable if you look, but not competing
+   with the star/planets/spheres on top of it. If it reads as
+   cluttered/distracting rather than subtle, tell me - `STARFIELD_STAR_COUNT`
+   and the brightness range are easy to turn down further.
+3. Every button (gravity +/-, shot speed +/-, move </>, Pass) should now
+   look like an actual grey beveled button - lighter along the top edge,
+   darker along the bottom, a visible border - not a flat solid-color
+   rectangle like before.
+4. Top-left: instead of five separate lines of plain text, there should
+   now be one small panel box containing the turn/phase line and three
+   labeled bars (Player HP in blue, Target HP in red, Target Planet Mass
+   in amber), each bar shrinking as that stat drops. The standalone
+   "Missile Y" line above the panel is unchanged.
+5. Take a few shots, let the AI go, and damage both the target character
+   and the target planet - confirm both the Target HP bar and the Target
+   Planet Mass bar visibly shrink as HP/mass drop, and flip to
+   "DEFEATED"/"DESTROYED" text (bar disappears/empties) at zero, same
+   behavior as the old plain-text version.
+6. If the button style, panel look, bar colors, or starfield density
+   feel off in any way, tell me what you'd change - same
+   regenerate-the-script or swap-in-real-art follow-up path as every
+   art phase so far.
+
+**First on-device screenshot found two real bugs, both fixed:**
+- **Stats panel rows overlapped into an unreadable jumbled clump.**
+  `renderStatsPanel`'s `rowHeight` was set to `HudFont.scaled(40f)` -
+  smaller than this font actually renders at this scale (the old
+  separate-line HUD used 60px of vertical gap per text-only line, proven
+  comfortable; each new row also needs room for a bar underneath the
+  text, which 40px can't fit at all). Result: each row's text started
+  before the previous row's text/bar had finished, so all four rows
+  visually collided into overlapping text with bars slicing through
+  letters. **Fix:** `rowHeight` bumped to `HudFont.scaled(70f)`,
+  `panelWidth` widened slightly (300 -> 320, the label+value text was
+  also crowding the right edge), `panelPadding` 10 -> 12.
+- **The panel background was barely visible against the space
+  background.** `panel.png`'s original fill (22,27,38) was too close in
+  value to the scene's navy clear color (11,18,32) - the box read as
+  almost nothing, just a faint outline. **Fix:** regenerated with a
+  noticeably lighter fill (32,38,52) and a brighter border (105,114,138)
+  so the panel now clearly reads as a distinct HUD element.
+
+**Second on-device screenshot (after the fix above) found a third bug,
+also fixed:** the panel was now visible and rows weren't colliding with
+each other any more, but each row's bar sliced straight through the
+middle of that row's own label/value text - a "strikethrough" look, not
+a bar sitting below the text. Root cause: `drawStatBar` positioned the
+bar `HudFont.scaled(22f)` below the text's top - a guessed number that
+turned out to be well within this font's actual rendered height at
+Phase 7's tuned scale (2.4x, see `HudFont`'s class doc comment), not
+below it. The first fix's `rowHeight = HudFont.scaled(70f)` was the same
+kind of guess and had just happened to still be enough room row-to-row,
+masking the fact that the *within-row* text/bar spacing was still wrong.
+**Real fix, not another guess:** both `renderStatsPanel`'s `rowHeight`
+and `drawStatBar`'s bar position now read `HudFont.font.lineHeight` -
+the font's own actual measured line height at whatever scale/density
+it's currently rendering at - instead of a hardcoded pixel count, with
+three small named gap constants (`STATS_BAR_HEIGHT`,
+`STATS_BAR_GAP_BELOW_TEXT`, `STATS_ROW_GAP`, all run through
+`HudFont.scaled(...)` like every other fixed UI dimension in this file)
+shared between both places so they can't silently drift out of sync
+with each other again the way the old 70f/22f pair did.
+
+**Aside confirmed during this same round: the round "notch" shape seen
+in the second screenshot (briefly suspected as a bug) was a Samsung
+system overlay (most likely an Edge panel/pop-up view handle), not
+anything `PlayScreen` draws - confirmed by it being absent from the next
+screenshot with no code change in between. Genuinely not an app bug,
+noted here only so a future session doesn't rediscover the same dead
+end.**
+
+**Third real bug, also from this round, also fixed:** the turn/phase
+text ("Turn 2 - Pre-shot: 0 left") ran past the panel's right edge -
+`panelWidth` was yet another guessed constant (`HudFont.scaled(320f)`)
+that didn't account for how long that text can actually get across
+different turn numbers/phases/step counts. **Fix, same pattern as the
+two bugs above - measure, don't guess:** `renderStatsPanel` now builds
+every row's label/value strings FIRST, measures all of them with
+`HudFont.widthOf(...)`, and sizes `panelWidth` to whichever is widest
+(with a small minimum floor so the panel never gets oddly narrow) -
+only then draws the panel background and content. The panel now can't
+run out of room for its own text, no matter how long the turn counter
+or a stat's numbers get.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

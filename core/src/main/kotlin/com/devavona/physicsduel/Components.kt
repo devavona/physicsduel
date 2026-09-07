@@ -34,7 +34,7 @@ class DraggableComponent : Component
  * source destructible by default; every design conversation about this
  * mechanic so far has been about planets/moons specifically, not the star.
  */
-class GravitySourceComponent(initialMass: Float, val isDamageable: Boolean = true) : Component {
+class GravitySourceComponent(val initialMass: Float, val isDamageable: Boolean = true) : Component {
     var mass: Float = initialMass
         private set
 
