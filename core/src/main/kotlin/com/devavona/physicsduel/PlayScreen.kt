@@ -12,6 +12,7 @@ import com.badlogic.gdx.Screen
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.GL20
 import com.badlogic.gdx.graphics.OrthographicCamera
+import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import com.badlogic.gdx.math.Rectangle
@@ -326,6 +327,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // "any future HUD reuses this pattern" payoff Phase 7 was built to prove.
     private val hudCamera = OrthographicCamera()
     private val hudBatch = SpriteBatch()
+    // Phase 18 - baseline sprite art. worldBatch draws in the same world
+    // units/camera as shapeRenderer/debugRenderer (not hudCamera - these
+    // are real scene objects, not screen-space HUD). Textures are
+    // deliberately generic-placeholder art (procedurally generated, not
+    // hand-drawn) - see PROJECT_STATE.md's Phase 18 entry for the plan to
+    // swap in real/purchased art later without touching this code, since
+    // loading is just a file-name lookup.
+    private val worldBatch = SpriteBatch()
+    private val starTexture = Texture(Gdx.files.internal("textures/star.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    private val planetLaunchTexture = Texture(Gdx.files.internal("textures/planet_launch.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
+    private val planetTargetTexture = Texture(Gdx.files.internal("textures/planet_target.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
     private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
     private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
@@ -693,6 +711,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // to.
         viewport.apply()
         camera.update()
+        renderCelestialSprites()
         debugRenderer.render(world, camera.combined)
         renderDebugOverlay()
         renderAimTrajectoryPreview()
@@ -719,6 +738,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderTargetHud()
         renderTargetPlanetHud()
         renderPlayerHud()
+    }
+
+    /**
+     * Phase 18 - baseline sprite art for the star and the two planets,
+     * drawn in world space before [debugRenderer] so its wireframe
+     * outlines still overlay each sprite - lets on-device testing
+     * directly confirm each sprite lines up with its real Box2D fixture
+     * (same center, same diameter) rather than trusting it by eye alone.
+     * Deliberately doesn't touch the avatar, AI target, or missiles yet -
+     * those stay debug markers/wireframes for this pass, see
+     * PROJECT_STATE.md's Phase 18 entry for the narrow scope and why.
+     */
+    private fun renderCelestialSprites() {
+        worldBatch.projectionMatrix = camera.combined
+        worldBatch.begin()
+        val starDiameter = STAR_RADIUS * 2f
+        worldBatch.draw(starTexture, STAR_X - STAR_RADIUS, STAR_Y - STAR_RADIUS, starDiameter, starDiameter)
+        val planetDiameter = PLANET_RADIUS * 2f
+        worldBatch.draw(planetLaunchTexture, LAUNCH_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
+        worldBatch.draw(planetTargetTexture, TARGET_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
+        worldBatch.end()
     }
 
     /**
@@ -1062,5 +1102,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         debugRenderer.dispose()
         shapeRenderer.dispose()
         hudBatch.dispose()
+        worldBatch.dispose()
+        starTexture.dispose()
+        planetLaunchTexture.dispose()
+        planetTargetTexture.dispose()
     }
 }

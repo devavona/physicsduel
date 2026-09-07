@@ -1584,6 +1584,98 @@ strong should gravity feel."
 .DEFAULT_MULTIPLIER` updated from 0.5 to 0.4 - a fresh run now starts
 already at the speed Boo confirmed felt right, no redialing needed.
 
+## Phase 18: baseline sprite art (star + two planets)
+
+**Status: Built, awaiting on-device test.** First real graphics pass -
+everything on screen so far has been [Box2DDebugRenderer] wireframes.
+Deliberately narrow scope, decided with Boo before building: only the
+star and the two planets get real sprite art this phase; the avatar, AI
+target, and missiles all stay as debug markers/wireframes for now, so
+this is testable in one on-device pass without redesigning the whole
+scene at once.
+
+**Engine decision (discussed with Boo first):** no new graphics engine
+needed or added - LibGDX already ships a full 2D sprite pipeline
+(`SpriteBatch`/`Texture`/`TextureRegion`), completely separate from
+Box2D (physics only) and from [ShapeRenderer] (debug-shape drawing,
+already in use for the aim line/trajectory preview/flight trails). This
+phase is just the first real use of that already-present sprite
+pipeline, not a new dependency.
+
+**Where the art came from.** The plan discussed with Boo was to pull
+free CC0 placeholder art from Kenney.nl (a "Planets" pack exists that
+would've been a near-perfect fit). In practice, neither the cloud
+sandbox nor the device-bridge shell has network access to kenney.nl -
+both sit behind an egress allowlist that only permits a short list of
+package registries/Anthropic endpoints, confirmed by a direct `curl`
+attempt from both getting rejected at the proxy (HTTP 403). Rather than
+block the phase on that, the three sprites (star, launch planet, target
+planet) were procedurally generated instead - a small numpy/Pillow
+script renders each as a shaded sphere (radial lighting from a fixed
+light direction, limb darkening, a few soft crater blotches on the
+planets, per-pixel noise for texture, antialiased circular alpha edge)
+and the star as a hot core with a soft glowing falloff past its disc.
+Genuinely usable baseline art, not just solid-color circles - but if
+Boo would rather have Kenney's real pack (or any other art), that's a
+files-only swap: same filenames, same folder, zero code changes, since
+loading is a plain `Gdx.files.internal("textures/...")` lookup. Boo can
+grab it himself from kenney.nl (which his own browser can reach fine)
+and hand over the PNGs whenever.
+
+- **`android/src/main/assets/textures/`** (new folder) - `star.png`,
+  `planet_launch.png` (warm rust/orange rocky world), `planet_target.png`
+  (cool teal/blue oceanic world - deliberately different from the launch
+  planet so the two are distinguishable at a glance, not just by
+  position). All 256x256 RGBA PNGs with a transparent circular alpha
+  mask (planets) or a soft glow-falloff alpha (star), same folder
+  `AudioManager` already uses for `audio/tap.wav`.
+- **`PlayScreen`** - new `worldBatch: SpriteBatch` (separate from the
+  existing `hudBatch`, which draws screen-space HUD via `hudCamera`;
+  `worldBatch` draws in the same world units/camera as `shapeRenderer`/
+  `debugRenderer`, since these are real scene objects, not HUD) plus
+  three `Texture` fields (linear-filtered for smooth scaling from a
+  256px source down to ~1-1.6 world units on screen). New
+  `renderCelestialSprites()` draws each texture centered on its known
+  world position, sized to exactly match its Box2D fixture's diameter
+  (`radius * 2`) - called in `render()` right before
+  `debugRenderer.render(...)`, so the debug wireframe circle still draws
+  on top of each sprite this pass. Deliberate for testing: if a sprite
+  doesn't line up exactly inside its wireframe outline, that's
+  immediately visible on-device, rather than trusting position/size by
+  eye alone. Once confirmed aligned, hiding the wireframes for just
+  these three bodies (while keeping them for the avatar/AI target/
+  missiles, which don't have sprites yet) is a real future step, not
+  done automatically here - `Box2DDebugRenderer` draws every body
+  uniformly, so exempting specific ones needs a small deliberate change,
+  not a one-line toggle.
+- Textures are disposed in `PlayScreen.dispose()` alongside the other
+  native-backed resources (`world`, `debugRenderer`, `shapeRenderer`,
+  `hudBatch`) - same "must dispose explicitly or it leaks" rule already
+  documented there.
+
+### How to test Phase 18 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. The star and both planets should now show real sphere
+   art (star: glowing yellow/orange core; launch planet: rust/orange
+   rocky; target planet: teal/blue) instead of plain wireframe circles -
+   with each sprite's wireframe outline still visible right on top of it
+   (expected this phase, see above - confirms alignment).
+3. Confirm each sprite is centered correctly and sized to match its
+   wireframe exactly (no visible offset, no sprite noticeably bigger or
+   smaller than the circle it's supposed to fill).
+4. Confirm the avatar marker, AI target, and any fired missiles still
+   look exactly as before (plain wireframe/debug shapes) - this phase
+   deliberately doesn't touch them.
+5. Play through a normal turn or two (move, aim, fire, let the AI go) -
+   confirm nothing about gameplay/physics/AI behavior changed, this is a
+   visual-only phase.
+6. If the art style, colors, or sizing feel off, or you'd rather swap in
+   Kenney's real pack (or something else) instead of the procedural
+   placeholders, tell me - either is a quick follow-up (regenerate the
+   procedural script with different parameters, or swap in real PNG
+   files at the same paths).
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
