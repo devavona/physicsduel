@@ -539,6 +539,19 @@ Roster so far, RPG-style, not final/complete:
 - More classes expected over time; this list is a starting point, not
   exhaustive.
 
+**Shot speed is per-weapon, not one global value (added after Phase 17).**
+Boo's observation once weapons/ammo are real: "when we introduce new
+ammo/weapons, the speed should be different for them" - e.g. a
+Sharpshooter's laser should feel fast/direct, a Bombardier's lob should
+feel slow and heavy. Decided shape for when the weapon system gets built:
+[ShotSpeedTuning]'s live multiplier (currently 0.4x default, Phase 17)
+stays as a single global "overall pace" feel-dial, and each weapon type
+gets its own base-speed constant that the global multiplier is applied on
+top of - so tuning overall game feel and differentiating weapons stay two
+separate, non-conflicting knobs instead of needing a dial per weapon.
+Not built - no weapon system exists in code yet (roster above is design
+only). Flagging here for whenever that system actually gets built.
+
 **Damage model:**
 - A direct hit on an opposing character removes that character's health -
   health lives on characters, not on celestial bodies.
