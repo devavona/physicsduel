@@ -183,6 +183,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val AI_TRAJECTORY_SIM_MAX_SECONDS = 4f
         private const val AI_TRAJECTORY_SIM_STEP_SECONDS = 1f / 60f
 
+        // AI accuracy pass - illustrative, not tuned. Applied to the
+        // search's already-best answer, right before firing (see
+        // AiTurnController.applyAimError) - not part of the search
+        // itself, so this doesn't affect how SMART the AI's shot choice
+        // is, only how perfectly it executes it. +-4 degrees / +-6% speed
+        // is deliberately small: enough that two identical setups won't
+        // fire pixel-identical shots (Boo, explicit: "too easy to game"),
+        // small enough to still read as a deliberate, competent shot.
+        private const val AI_AIM_ERROR_DEGREES = 4f
+        private const val AI_AIM_ERROR_SPEED_FRACTION = 0.06f
+
         // Visual polish, not a new mechanic - see TrailComponent's doc
         // comment. 90 points at one recorded per render frame is ~1.5
         // seconds of trail at 60fps - long enough to show a full arc for
@@ -518,6 +529,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             gravityMultiplier = { gravitySystem.gravityMultiplier },
             gravitySources = { gravitySystem.currentSources() },
             shotSpeedMultiplier = { shotSpeedTuning.multiplier },
+            aimErrorDegrees = AI_AIM_ERROR_DEGREES,
+            aimErrorSpeedFraction = AI_AIM_ERROR_SPEED_FRACTION,
             onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
             onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
         )

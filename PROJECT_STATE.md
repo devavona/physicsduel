@@ -1954,6 +1954,95 @@ only then draws the panel background and content. The panel now can't
 run out of room for its own text, no matter how long the turn counter
 or a stat's numbers get.
 
+## Phase 19d: AI accuracy pass (aim error + gravity-aware repositioning)
+
+**Status: Built, awaiting on-device test.** Boo played a few turns and
+flagged two real gameplay-quality issues, both diagnosed to their actual
+root cause (not just symptom-patched) before fixing:
+
+- **"It seems to take the exact same shot every time if I don't move...
+  too easy to game."** Root cause: `AiTurnController.searchAim` is a
+  fully deterministic search - same origin/target/planet state always
+  produces the exact same "best" answer, with zero randomness anywhere
+  in the pipeline. Not a bug exactly (the search is *supposed* to find
+  the objectively best shot), but it means a stationary player can
+  trivially learn and counter one fixed shot.
+- **"The AI deciding to move for a better angle seems very primitive."**
+  Root cause: `reposition()` scored candidate positions with
+  `obstructionSeverity` - a straight-line-only check with no idea a real
+  missile curves under gravity - while the actual shot decision
+  (`searchAim`) was already the much smarter gravity-aware simulation.
+  The two steps were answering different questions ("is there a clear
+  straight line" vs. "what's the best curved shot"), which is exactly
+  why movement felt disconnected/dumb next to the aiming.
+
+**Fix 1: aim error.** `AiTurnController.applyAimError` (new) perturbs
+`searchAim`'s already-best answer with a small random angle/speed jitter
+right before firing - `AI_AIM_ERROR_DEGREES` (4°) and
+`AI_AIM_ERROR_SPEED_FRACTION` (0.06, illustrative/not tuned, in
+`PlayScreen`) control the range. Deliberately applied AFTER the search,
+not folded into it - the search still always finds the objectively best
+candidate; this only simulates imperfect *execution* of that shot, so
+the AI doesn't get dumber, it gets less mechanically perfect. `<= 0f`
+for either parameter disables that part of the jitter entirely, useful
+for isolating other bugs without randomness in the way. Also a natural
+future hook (not built yet): the campaign progression ladder (5/20/30
+wins, see "Campaign progression ladder" above) could tighten this error
+over time as an actual difficulty curve, not just more planets/
+characters.
+
+**Fix 2: gravity-aware repositioning.** `searchAim`'s core sweep-and-
+simulate logic was extracted into a new shared method,
+`bestAimFor(origin, baseAngleRadians, target, ...)`, returning both the
+best velocity AND how close it predicted getting
+(`Pair<Vector2, Float>`). `reposition()` now calls `bestAimFor` for
+every candidate position it considers (closest-first, same movement
+budget as before) and picks whichever position yields the best
+predicted shot - not just an unobstructed straight line. Movement and
+aiming are now judged by the exact same yardstick. `obstructionSeverity`/
+`distanceFromSegment` (the old straight-line-only check) are removed -
+no longer used anywhere. Early-exit changed from "first fully clear"
+to "first predicted-approach this close to a direct hit"
+(`repositionGoodEnoughApproach`, 0.25 world units) - conceptually the
+same "stop once it's good enough" shortcut, just against the new,
+better metric.
+
+**Performance note (why this is fine despite being ~11x more simulation
+work per turn):** `reposition` now runs a full `bestAimFor` sweep (the
+same ~93-candidate simulation `searchAim` already does once) for every
+candidate position it checks - up to 11 positions with the current
+`MOVEMENT_STEPS_PER_PHASE` (5). That's roughly 250k simple vector-math
+operations per AI turn, done once during the existing `AI_THINK_DELAY_
+SECONDS` pause, not per frame - trivial for a phone CPU, no observable
+impact expected. Flagging here in case on-device testing shows
+otherwise (e.g. a visible stutter right as the AI's turn starts).
+
+### How to test Phase 19d on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Take a shot, then deliberately do nothing different (same avatar
+   position) across a few of your turns while the AI keeps firing back -
+   its shots should now vary slightly turn to turn (a bit of visible
+   angle/speed variation) instead of looking pixel-identical every time.
+3. The variation should read as "slightly imperfect," not "wildly
+   random" - if it looks too twitchy/inaccurate or barely noticeable
+   either way, tell me and `AI_AIM_ERROR_DEGREES`/
+   `AI_AIM_ERROR_SPEED_FRACTION` are a quick retune.
+4. Set up a scenario where the AI would need to move to get a decent
+   shot (e.g., stand somewhere that puts a planet between you) - watch
+   whether it now relocates to a position that sets up a genuinely
+   better curved shot, not just anywhere with a technically-clear
+   straight line.
+5. Watch turn-hand-off timing (the "AI's turn..." pause) for any new
+   stutter/delay compared to before - see the performance note above;
+   this isn't expected to be noticeable, but worth explicitly checking
+   since this phase meaningfully increased how much simulation runs per
+   AI turn.
+6. Logcat (filter `AiTurnController`) now logs both the search's true
+   best answer and the actually-fired (post-error) speed in the same
+   line, if you want to distinguish "the search chose a bad shot" from
+   "the error jitter threw off a good one" while tuning.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

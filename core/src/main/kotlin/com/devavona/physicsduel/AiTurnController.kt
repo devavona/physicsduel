@@ -42,6 +42,22 @@ import kotlin.math.atan2
  * better shot outside that sweep's range simply won't be found. A genuine
  * next step (not this phase) would widen or adapt that sweep, or search
  * position and aim together instead of one after the other.
+ *
+ * **AI accuracy pass (Sept 2026 session).** Boo's feedback after playing
+ * a few turns: the AI took the *exact same shot every time* when he
+ * didn't move (true - [searchAim] was, and still is, a deterministic
+ * search with no randomness anywhere), and its repositioning "seems
+ * very primitive" (also true - [reposition] used to score candidate
+ * positions with [obstructionSeverity], a straight-line-only check that
+ * had no idea a real shot curves under gravity, while the shot itself
+ * was scored with the much smarter gravity-aware simulation). Two
+ * changes: [applyAimError] perturbs the search's "best" answer with a
+ * small random angle/speed jitter right before firing, so shots stop
+ * being perfectly repeatable without touching the search itself; and
+ * [reposition] now scores every candidate position with [bestAimFor] -
+ * the exact same gravity-aware simulation [searchAim] uses to score a
+ * shot - instead of a separate, cruder straight-line heuristic, so
+ * movement and aiming are finally judged by the same yardstick.
  */
 class AiTurnController(
     private val planetCenter: Vector2,
@@ -78,6 +94,13 @@ class AiTurnController(
     // stretch to match, or a slowed-down shot would look like it "can't
     // reach" the target when it just needed more simulated time.
     private val shotSpeedMultiplier: () -> Float,
+    // AI accuracy pass - a small random perturbation applied to the
+    // search's genuinely-best answer right before firing, see
+    // applyAimError. Illustrative defaults live in PlayScreen, same as
+    // every other AI tuning knob - not meant to be a difficulty tier by
+    // itself yet, just enough to stop shots being perfectly repeatable.
+    private val aimErrorDegrees: Float,
+    private val aimErrorSpeedFraction: Float,
     // origin: wherever `position` ended up after this turn's reposition -
     // the AI's own current position is the single source of truth for both
     // "where its body is drawn" and "where its shot spawns from", same
@@ -88,7 +111,13 @@ class AiTurnController(
 
     private val trajectorySimulator = TrajectorySimulator(gravitationalConstant, gravityMinDistance)
 
-    /** One circular obstacle a straight-line shot can be blocked by - see [obstructionSeverity]. Fixed geometry (a planet/star's center+radius), not a live Box2D reference. */
+    // AI accuracy pass - reposition() stops scanning further candidate
+    // positions once one predicts an approach this close (world units) -
+    // effectively already a direct hit, nothing meaningful left to gain
+    // by continuing to search the rest of the movement budget.
+    private val repositionGoodEnoughApproach = 0.25f
+
+    /** One circular obstacle a simulated shot can collide with - see [simulateClosestApproach]. Fixed geometry (a planet/star's center+radius), not a live Box2D reference. */
     data class Obstacle(val center: Vector2, val radius: Float)
 
     /**
@@ -140,30 +169,43 @@ class AiTurnController(
     }
 
     /**
-     * Searches candidate angles around [planetCenter] - starting from
-     * wherever the AI already is (0 steps), then out to +-1 step, +-2
-     * steps, up to +-[stepsPerPhase] - for the first with a fully clear
-     * straight line to [target] (per [obstructionSeverity]), and moves
-     * [angleDegrees] there. If none in range is fully clear, falls back to
-     * whichever candidate had the lowest (least-blocked) severity, so the
-     * AI always ends up somewhere reasonable instead of refusing to act.
-     * Trying closest-first means an already-clear shot (the common case)
-     * costs no movement at all - the AI only relocates when it actually
-     * needs to.
+     * AI accuracy pass - searches candidate positions around
+     * [planetCenter], closest-first (same 0, +-1 step, +-2 steps... up to
+     * +-[stepsPerPhase] pattern as before), for whichever gives the best
+     * PREDICTED SHOT via [bestAimFor] - not just an unobstructed straight
+     * line like the old [obstructionSeverity]-based version. Movement and
+     * aiming are now judged by the exact same yardstick: the same
+     * gravity-aware simulation [searchAim] itself uses to score a shot.
+     * Stops early once a candidate's predicted approach is already
+     * essentially a direct hit ([repositionGoodEnoughApproach]) -
+     * there's nothing meaningfully better to keep searching for - and
+     * otherwise falls back to whichever candidate scored best across the
+     * full budget, same "always end up somewhere reasonable" guarantee
+     * as before.
      */
     private fun reposition(target: Vector2) {
+        val sources = gravitySources()
+        val multiplier = gravityMultiplier()
+        val speedTuning = shotSpeedMultiplier()
+        val effectiveAimSpeed = aimSpeed * speedTuning
+        val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
+
         var bestAngle = angleDegrees
-        var bestSeverity = Float.MAX_VALUE
+        var bestApproach = Float.MAX_VALUE
         for (steps in 0..stepsPerPhase) {
             val offsets = if (steps == 0) listOf(0f) else listOf(steps * stepAngleDegrees, -steps * stepAngleDegrees)
             for (offset in offsets) {
                 val candidateAngle = angleDegrees + offset
-                val severity = obstructionSeverity(positionAt(candidateAngle), target)
-                if (severity < bestSeverity) {
-                    bestSeverity = severity
+                val candidateOrigin = positionAt(candidateAngle)
+                val (_, approach) = bestAimFor(
+                    candidateOrigin, candidateAngle * MathUtils.degreesToRadians, target,
+                    sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
+                )
+                if (approach < bestApproach) {
+                    bestApproach = approach
                     bestAngle = candidateAngle
                 }
-                if (severity <= 0f) {
+                if (approach <= repositionGoodEnoughApproach) {
                     angleDegrees = bestAngle
                     return
                 }
@@ -176,35 +218,6 @@ class AiTurnController(
         val rad = angle * MathUtils.degreesToRadians
         val r = planetRadius + heightAboveSurface
         return Vector2(planetCenter.x + r * MathUtils.cos(rad), planetCenter.y + r * MathUtils.sin(rad))
-    }
-
-    /**
-     * How badly the straight line from [from] to [to] cuts through the
-     * worst-offending [obstacles] entry: positive means blocked (and by
-     * how much - the obstacle's radius minus the line's closest approach
-     * to its center), zero or negative means clear (with that much margin
-     * to spare). Takes the *worst* obstacle, not the sum, since a shot
-     * either has a clear path or it doesn't - being blocked by two planets
-     * at once isn't "twice as bad" as being blocked by one.
-     */
-    private fun obstructionSeverity(from: Vector2, to: Vector2): Float {
-        var worst = -Float.MAX_VALUE
-        for (obstacle in obstacles) {
-            val clearance = obstacle.radius - distanceFromSegment(from, to, obstacle.center)
-            if (clearance > worst) worst = clearance
-        }
-        return worst
-    }
-
-    /** Shortest distance from [point] to the line segment [from]-[to]. */
-    private fun distanceFromSegment(from: Vector2, to: Vector2, point: Vector2): Float {
-        val segment = Vector2(to).sub(from)
-        val lengthSq = segment.len2()
-        val t = if (lengthSq > 0.0001f) {
-            (((point.x - from.x) * segment.x + (point.y - from.y) * segment.y) / lengthSq).coerceIn(0f, 1f)
-        } else 0f
-        val closest = Vector2(from).add(segment.scl(t))
-        return closest.dst(point)
     }
 
     private fun fire() {
@@ -258,8 +271,76 @@ class AiTurnController(
         // more simulated time to be judged fairly (see the constructor's
         // shotSpeedMultiplier doc comment).
         val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
-
         val baseAngleRadians = angleDegrees * MathUtils.degreesToRadians
+
+        val (bestVelocity, bestApproach) = bestAimFor(
+            origin, baseAngleRadians, target, sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
+        )
+        val firedVelocity = applyAimError(bestVelocity)
+
+        // Diagnostic - Boo's Phase 15 feedback was "if it is curving it's
+        // very difficult to tell" from watching the missile alone; this
+        // gives a hard number (how far the chosen aim actually deviates
+        // from a straight line) to check alongside the new drawn trail
+        // (see PlayScreen.renderProjectileTrails), in case the trail still
+        // isn't conclusive on-device. Now also logs the search's true
+        // best answer alongside what was actually fired, so an on-device
+        // Logcat check can tell "the search found a bad shot" apart from
+        // "the search found a good shot but the error jitter threw it
+        // off" - useful while tuning aimErrorDegrees/aimErrorSpeedFraction.
+        val straightLineAngleRadians = atan2(target.y - origin.y, target.x - origin.x)
+        val chosenAngleRadians = atan2(bestVelocity.y, bestVelocity.x)
+        val offsetFromStraightDegrees = (chosenAngleRadians - straightLineAngleRadians) * MathUtils.radiansToDegrees
+        Gdx.app.log(
+            "AiTurnController",
+            "Aim chosen: angleOffsetFromStraightLine=%.1f degrees, speed=%.2f, predicted closest approach=%.2f, firedSpeed=%.2f"
+                .format(offsetFromStraightDegrees, bestVelocity.len(), bestApproach, firedVelocity.len())
+        )
+
+        return firedVelocity
+    }
+
+    /**
+     * Core of the aim search, shared by [searchAim] (scoring the AI's
+     * actual, already-committed position/firing angle) and [reposition]
+     * (scoring hypothetical candidate positions before committing to
+     * one) - see the class doc comment's "AI accuracy pass" paragraph
+     * for why [reposition] needs this instead of the old, cruder
+     * straight-line-only check. Sweeps aim angle (centered on
+     * [baseAngleRadians] - see [searchAim]'s original doc comment,
+     * preserved below, for why that's the outward-facing direction and
+     * not a straight line to target) and speed, simulating each
+     * candidate's actual gravity-curved flight, and returns whichever
+     * gets closest along with how close that was.
+     *
+     * **The sweep is centered on the position's own outward-facing
+     * direction - not on a straight line toward [target].** First
+     * on-device test after Phase 15 caught exactly why that matters:
+     * from the far side of its own planet, a straight line toward the
+     * target points directly *into* that same planet - every candidate
+     * angle near that line self-collides in the very first simulated
+     * step or two, so none of them could ever beat the useless
+     * straight-line default the search started with, and the AI ended up
+     * firing "in the same direction... like it didn't notice the planet
+     * it was on." The outward-facing direction, by construction, always
+     * points straight away from that position's own surface -
+     * guaranteed clear of self-collision at the start of every candidate
+     * - so centering the sweep there instead means every candidate
+     * actually gets a fair, uninterrupted simulation.
+     * [AimSearchConfig.angleSearchDegrees] (120°) is wide enough to still
+     * cover the straight-line-to-target direction whenever *that* happens
+     * to be unobstructed (the common case) - this isn't a narrower
+     * search, just a correctly-centered one.
+     */
+    private fun bestAimFor(
+        origin: Vector2,
+        baseAngleRadians: Float,
+        target: Vector2,
+        sources: List<Pair<Vector2, Float>>,
+        multiplier: Float,
+        effectiveAimSpeed: Float,
+        effectiveSimMaxSeconds: Float
+    ): Pair<Vector2, Float> {
         var bestVelocity = Vector2(target).sub(origin).nor().scl(effectiveAimSpeed)
         var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
 
@@ -277,24 +358,29 @@ class AiTurnController(
                 }
             }
         }
+        return bestVelocity to bestApproach
+    }
 
-        // Diagnostic - Boo's Phase 15 feedback was "if it is curving it's
-        // very difficult to tell" from watching the missile alone; this
-        // gives a hard number (how far the chosen aim actually deviates
-        // from a straight line) to check alongside the new drawn trail
-        // (see PlayScreen.renderProjectileTrails), in case the trail still
-        // isn't conclusive on-device. Cheap (once per AI turn) - fine to
-        // leave in rather than strip out once this is confirmed working.
-        val straightLineAngleRadians = atan2(target.y - origin.y, target.x - origin.x)
-        val chosenAngleRadians = atan2(bestVelocity.y, bestVelocity.x)
-        val offsetFromStraightDegrees = (chosenAngleRadians - straightLineAngleRadians) * MathUtils.radiansToDegrees
-        Gdx.app.log(
-            "AiTurnController",
-            "Aim chosen: angleOffsetFromStraightLine=%.1f degrees, speed=%.2f, predicted closest approach=%.2f"
-                .format(offsetFromStraightDegrees, bestVelocity.len(), bestApproach)
-        )
-
-        return bestVelocity
+    /**
+     * AI accuracy pass - applied to [searchAim]'s genuinely-best answer,
+     * right before firing, never to the search itself (the search still
+     * always finds the objectively best candidate it can; this just
+     * simulates imperfect *execution* of that shot). A small uniform
+     * random angle offset (+-[aimErrorDegrees]) and speed offset
+     * (+-[aimErrorSpeedFraction] as a fraction of the intended speed) -
+     * enough that two turns with an identical setup won't fire pixel-
+     * identical shots any more (Boo, explicit: "it seems to take the
+     * exact same shot every time... too easy to game"), small enough
+     * that it still reads as a deliberate, competent shot rather than a
+     * wild miss. A `<= 0f` value for either parameter disables that part
+     * of the jitter entirely (exact behavior, useful for isolating bugs
+     * without the randomness in the way).
+     */
+    private fun applyAimError(velocity: Vector2): Vector2 {
+        if (aimErrorDegrees <= 0f && aimErrorSpeedFraction <= 0f) return velocity
+        val angleErrorRadians = MathUtils.random(-aimErrorDegrees, aimErrorDegrees) * MathUtils.degreesToRadians
+        val speedErrorFactor = 1f + MathUtils.random(-aimErrorSpeedFraction, aimErrorSpeedFraction)
+        return Vector2(velocity).rotateRad(angleErrorRadians).scl(speedErrorFactor)
     }
 
     /**
