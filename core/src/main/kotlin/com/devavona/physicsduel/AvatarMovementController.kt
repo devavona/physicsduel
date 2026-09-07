@@ -34,7 +34,13 @@ class AvatarMovementController(
     private val heightAboveSurface: Float,
     private val stepsPerPhase: Int,
     private val stepAngleDegrees: Float,
-    startAngleDegrees: Float
+    startAngleDegrees: Float,
+    // Phase 12: lets PlayScreen hand off to the AI's turn the moment this
+    // one ends, regardless of which of the two passTurn() triggers (the
+    // post-shot budget hitting zero, or an early Pass tap) caused it.
+    // Defaults to a no-op so every earlier test/usage of this class still
+    // compiles unchanged.
+    private val onTurnPassed: () -> Unit = {}
 ) : InputAdapter() {
 
     enum class Phase { PRE_SHOT, POST_SHOT }
@@ -131,5 +137,6 @@ class AvatarMovementController(
         phase = Phase.PRE_SHOT
         stepsRemaining = stepsPerPhase
         turnNumber++
+        onTurnPassed()
     }
 }

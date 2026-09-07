@@ -69,6 +69,26 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * the star are unchanged (the star opts out of being damaged at all - see
  * [createStar]).
  *
+ * **Phase 12 milestone: a minimal AI opponent.** The turn no longer just
+ * loops back to the player - [AiTurnController] (new) takes over for one
+ * turn in between, firing a single simple shot at wherever the player's
+ * avatar was standing when the hand-off happened, before control returns.
+ * Player input (movement + aiming) is disabled for that window by swapping
+ * [Gdx.input]'s processor rather than teaching every input class about a
+ * "whose turn is it" flag - see [restrictedInputProcessor]. See
+ * PROJECT_STATE.md's "Phase 12" entry for the full scope.
+ *
+ * **Phase 13 milestone: the player's avatar can take damage.** Closes the
+ * gap Phase 12 deliberately left open - [avatarBody] gives the avatar a
+ * real (kinematic, not physics-simulated - see that field's doc comment)
+ * Box2D body, and [avatarEntity] tags it [HealthComponent] the same way
+ * Phase 10 did for the target character, so [ProjectileContactListener]'s
+ * already-generic damage dispatch (no changes needed there) now applies to
+ * it too. Also fixes a fresh self-collision problem this exposed - a
+ * missile spawning exactly at its own firer's position would otherwise hit
+ * (and physically bounce off) that same firer the instant it's created -
+ * see [fireMissile]'s `excludeCategory` parameter.
+ *
  * [DragInputProcessor] is no longer wired up here - nothing in this
  * milestone's scene is tagged [DraggableComponent] anymore, since the demo
  * body it used to drag is gone. The class itself is untouched and stays in
@@ -111,6 +131,32 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // ProjectileContactListener.CELESTIAL_MASS_DAMAGE (0.5f) for the
         // same illustrative "4 hits to destroy" as the character target.
         private const val TARGET_PLANET_MASS = 2f
+
+        // Phase 12 - illustrative, not tuned. AI_THINK_DELAY_SECONDS is
+        // purely pacing (long enough that the turn hand-off is visible,
+        // not so long it feels sluggish); AI_AIM_SPEED is in the same
+        // range as the player's own PULL_POWER_SCALE-derived shot speeds.
+        private const val AI_AIM_SPEED = 8f
+        private const val AI_THINK_DELAY_SECONDS = 1f
+
+        // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
+        // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
+        // hitbox matches the size of the cyan marker circle Boo already
+        // sees on screen, rather than an invisible mismatch between what's
+        // drawn and what's hittable. AVATAR_MAX_HP matches TARGET_MAX_HP -
+        // no reason yet for the two sides to be asymmetric.
+        private const val AVATAR_RADIUS = LAUNCH_MARKER_RADIUS
+        private const val AVATAR_MAX_HP = 100
+
+        // Box2D collision-filter categories - only exist to solve one
+        // specific problem (see fireMissile's `excludeCategory` parameter):
+        // a missile spawns exactly at its firer's own position, so without
+        // this, it would immediately collide with (and physically bounce
+        // off) whoever just fired it. Not used for anything else - every
+        // other fixture in the scene keeps Box2D's default filter (collides
+        // with everything).
+        private const val CATEGORY_PLAYER_AVATAR: Short = 0x0002
+        private const val CATEGORY_AI_TARGET: Short = 0x0004
 
         // Launch/target planets sit at the same height, star above and
         // between them - a straight-line shot passes well below the star, so
@@ -157,6 +203,31 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var engine: Engine
     private lateinit var slingshotInputProcessor: SlingshotInputProcessor
     private lateinit var avatarMovementController: AvatarMovementController
+    private lateinit var aiTurnController: AiTurnController
+    private lateinit var aiLaunchPoint: Vector2
+
+    // Phase 13 - the avatar's own physics body. Kinematic, not dynamic:
+    // the avatar moves under AvatarMovementController's direct control
+    // (button taps stepping it around the planet), never under physics
+    // forces, so Kinematic is the Box2D body type actually meant for
+    // "moves via direct position control but still participates in
+    // collision detection" - unlike a static body (not meant to move at
+    // all, even though Box2D technically allows repositioning one) or a
+    // dynamic body (would let forces/collisions push it around, which
+    // nothing here should ever do). Position is kept in sync every frame
+    // in render(), the same place launchPoint already is.
+    private lateinit var avatarBody: Body
+    private lateinit var avatarEntity: Entity
+    private lateinit var targetCharacterEntity: Entity
+
+    // Built once in show(), swapped between on a turn hand-off (see
+    // avatarMovementController's onTurnPassed / aiTurnController's
+    // onTurnComplete below) rather than teaching every input class about a
+    // "whose turn is it" flag - restrictedInputProcessor omits
+    // avatarMovementController and slingshotInputProcessor entirely, so a
+    // touch during the AI's turn simply falls through to nothing.
+    private lateinit var fullInputProcessor: InputMultiplexer
+    private lateinit var restrictedInputProcessor: InputMultiplexer
     private lateinit var projectileContactListener: ProjectileContactListener
     private lateinit var launchPoint: Vector2
     private lateinit var gravitySystem: GravitySystem
@@ -176,8 +247,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
     private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
     private val gravityAffectedFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
-    private val healthFamily = Family.all(HealthComponent::class.java, PhysicsBodyComponent::class.java).get()
-
     // A direct reference, not a family query, because the star also carries
     // GravitySourceComponent now - a family query alone couldn't tell the
     // HUD which one to read. Kept even after the entity is removed from the
@@ -232,12 +301,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         engine.addEntity(targetPlanetEntity)
 
-        engine.addEntity(
-            Entity().apply {
-                add(PhysicsBodyComponent(createTarget()))
-                add(HealthComponent(TARGET_MAX_HP))
-            }
-        )
+        targetCharacterEntity = Entity().apply {
+            add(PhysicsBodyComponent(createTarget()))
+            add(HealthComponent(TARGET_MAX_HP))
+        }
+        engine.addEntity(targetCharacterEntity)
 
         avatarMovementController = AvatarMovementController(
             planetCenter = Vector2(LAUNCH_PLANET_X, PLANETS_Y),
@@ -245,9 +313,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             heightAboveSurface = LAUNCH_POINT_CLEARANCE,
             stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
             stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
-            startAngleDegrees = AVATAR_START_ANGLE_DEGREES
+            startAngleDegrees = AVATAR_START_ANGLE_DEGREES,
+            onTurnPassed = {
+                aiTurnController.startTurn(avatarMovementController.position)
+                Gdx.input.inputProcessor = restrictedInputProcessor
+            }
         )
         launchPoint = Vector2(avatarMovementController.position)
+
+        avatarBody = createAvatarBody(avatarMovementController.position)
+        avatarEntity = Entity().apply {
+            add(PhysicsBodyComponent(avatarBody))
+            add(HealthComponent(AVATAR_MAX_HP))
+        }
+        engine.addEntity(avatarEntity)
 
         slingshotInputProcessor = SlingshotInputProcessor(
             launchPoint = launchPoint,
@@ -256,21 +335,43 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             maxSpeed = MAX_MISSILE_SPEED,
             onFire = { velocity ->
                 if (avatarMovementController.canFire) {
-                    fireMissile(velocity)
+                    fireMissile(launchPoint, velocity, excludeCategory = CATEGORY_PLAYER_AVATAR)
                     avatarMovementController.onFired()
                 }
             }
         )
         gravityDebugController = GravityDebugController(gravitySystem)
+
+        // Same fixed spot Phase 10's target character stand-in sits at -
+        // the AI has no movement of its own yet (see the class doc
+        // comment), so its shots always originate from here.
+        aiLaunchPoint = Vector2(TARGET_PLANET_X, PLANETS_Y + PLANET_RADIUS + LAUNCH_POINT_CLEARANCE)
+        aiTurnController = AiTurnController(
+            launchPoint = aiLaunchPoint,
+            aimSpeed = AI_AIM_SPEED,
+            thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
+            onFire = { velocity -> fireMissile(aiLaunchPoint, velocity, excludeCategory = CATEGORY_AI_TARGET) },
+            onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
+        )
     }
 
     override fun show() {
-        val multiplexer = InputMultiplexer()
-        multiplexer.addProcessor(BackKeyHandler())
-        multiplexer.addProcessor(gravityDebugController)
-        multiplexer.addProcessor(avatarMovementController)
-        multiplexer.addProcessor(slingshotInputProcessor)
-        Gdx.input.inputProcessor = multiplexer
+        fullInputProcessor = InputMultiplexer().apply {
+            addProcessor(BackKeyHandler())
+            addProcessor(gravityDebugController)
+            addProcessor(avatarMovementController)
+            addProcessor(slingshotInputProcessor)
+        }
+        // Deliberately still includes BackKeyHandler (pausing should always
+        // work) and gravityDebugController (a standing debug tool, not
+        // something turn structure should ever lock out) - only the
+        // player's own movement/aiming input is left out during the AI's
+        // turn.
+        restrictedInputProcessor = InputMultiplexer().apply {
+            addProcessor(BackKeyHandler())
+            addProcessor(gravityDebugController)
+        }
+        Gdx.input.inputProcessor = fullInputProcessor
         Gdx.input.setCatchKey(Input.Keys.BACK, true) // otherwise Android treats Back as "quit app"
         resizeHudCamera()
     }
@@ -340,24 +441,69 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         val body = world.createBody(bodyDef)
         val shape = CircleShape().apply { radius = TARGET_RADIUS }
-        body.createFixture(shape, 0f)
+        // Phase 13: tagged CATEGORY_AI_TARGET so the AI's own missile (which
+        // spawns exactly here - see aiLaunchPoint) can exclude colliding
+        // with it - see fireMissile's excludeCategory parameter.
+        val fixtureDef = FixtureDef().apply {
+            this.shape = shape
+            filter.categoryBits = CATEGORY_AI_TARGET
+        }
+        body.createFixture(fixtureDef)
         shape.dispose()
         return body
     }
 
     /**
-     * Fires one missile from [launchPoint] with the given velocity (already
-     * computed by [SlingshotInputProcessor] - this function just spawns the
-     * body/entity, it doesn't know about pull vectors or power scaling).
+     * Phase 13's avatar body - see [avatarBody]'s field doc comment for why
+     * Kinematic. [initialPosition] seeds where it starts; [render] keeps it
+     * in sync with [AvatarMovementController]'s logical position every
+     * frame after that. Tagged [CATEGORY_PLAYER_AVATAR] so the player's own
+     * missile (which spawns exactly here - see [launchPoint]) can exclude
+     * colliding with it - see [fireMissile]'s `excludeCategory` parameter.
+     */
+    private fun createAvatarBody(initialPosition: Vector2): Body {
+        val bodyDef = BodyDef().apply {
+            type = BodyDef.BodyType.KinematicBody
+            position.set(initialPosition)
+        }
+        val body = world.createBody(bodyDef)
+        val shape = CircleShape().apply { radius = AVATAR_RADIUS }
+        val fixtureDef = FixtureDef().apply {
+            this.shape = shape
+            filter.categoryBits = CATEGORY_PLAYER_AVATAR
+        }
+        body.createFixture(fixtureDef)
+        shape.dispose()
+        return body
+    }
+
+    /**
+     * Fires one missile from [origin] with the given velocity (already
+     * computed by whichever caller is firing - [SlingshotInputProcessor]
+     * for the player, [AiTurnController] for the AI - this function just
+     * spawns the body/entity, it doesn't know about pull vectors, power
+     * scaling, or whose turn it is). [origin] used to be hardcoded to
+     * [launchPoint] - a real Phase 12 bug, since that meant the AI's shots
+     * spawned from the player's own position instead of [aiLaunchPoint].
      * Tagged [GravityAffectedComponent] so [GravitySystem] curves its
      * flight, and [ProjectileComponent] so [ProjectileContactListener]
      * knows to remove it on impact instead of leaving it as a permanent
      * scene body.
+     *
+     * [excludeCategory] (Phase 13) solves a problem [origin] otherwise
+     * causes on its own: a missile spawns exactly at its firer's position,
+     * so without this, it would immediately - physically, not just in game
+     * logic - collide with (and bounce off) whoever just fired it, the
+     * instant it's created. Passing the firer's own collision category
+     * here (see the CATEGORY_ constants) excludes just that one pairing;
+     * everything else the missile can hit still collides normally. `0`
+     * (the default) excludes nothing, for anything fired from a spot with
+     * no fixture of its own to worry about colliding with.
      */
-    private fun fireMissile(velocity: Vector2) {
+    private fun fireMissile(origin: Vector2, velocity: Vector2, excludeCategory: Short = 0) {
         val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.DynamicBody
-            position.set(launchPoint)
+            position.set(origin)
         }
         val body = world.createBody(bodyDef)
         val shape = CircleShape().apply { radius = MISSILE_RADIUS }
@@ -366,6 +512,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             density = 1f
             friction = 0.4f
             restitution = 0.2f
+            if (excludeCategory != 0.toShort()) {
+                filter.maskBits = (0xFFFF.toInt() and excludeCategory.toInt().inv()).toShort()
+            }
         }
         body.createFixture(fixtureDef)
         shape.dispose()
@@ -387,6 +536,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // both already hold a reference to - is refreshed here every frame
         // rather than being fixed once at construction like Phase 8's was.
         launchPoint.set(avatarMovementController.position)
+        avatarBody.setTransform(avatarMovementController.position, 0f)
+        aiTurnController.update(delta)
 
         engine.update(delta) // drives PhysicsSystem, which owns the fixed-timestep accumulator
         // Only safe to call after world.step() has fully returned for this
@@ -432,6 +583,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderMovementControls()
         renderTargetHud()
         renderTargetPlanetHud()
+        renderPlayerHud()
     }
 
     /**
@@ -547,10 +699,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             drawCenteredLabel("Pass", avatarMovementController.passButtonRect)
         }
 
-        val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"
-        val turnLabel = "Turn %d - %s: %d left".format(
-            avatarMovementController.turnNumber, phaseLabel, avatarMovementController.stepsRemaining
-        )
+        val turnLabel = if (aiTurnController.isTurnActive) {
+            "Turn ${avatarMovementController.turnNumber} - AI's turn..."
+        } else {
+            val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"
+            "Turn %d - %s: %d left".format(
+                avatarMovementController.turnNumber, phaseLabel, avatarMovementController.stepsRemaining
+            )
+        }
         val margin = HudFont.scaled(16f)
         val secondLineY = Gdx.graphics.height - margin - HudFont.scaled(60f) // below renderHud's "Missile Y" line
         HudFont.font.draw(hudBatch, turnLabel, margin, secondLineY)
@@ -568,16 +724,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     /**
      * Third HUD line, top-left (below "Missile Y" and the turn/phase
-     * readout): the Phase 10 target's remaining HP, or "DEFEATED" once
-     * [ProjectileContactListener] has actually removed it from the engine
-     * entirely (see [HealthComponent]) - the first on-device look at the
-     * damage model working end to end.
+     * readout): the Phase 10 target's remaining HP, or "DEFEATED" once its
+     * HealthComponent (still readable after removal - see
+     * [renderTargetPlanetHud]'s doc comment for why) hits zero. Reads
+     * [targetCharacterEntity] directly, not a family query - Phase 13 gave
+     * the player's avatar a [HealthComponent] too, so a family query alone
+     * couldn't tell the two apart any more than [gravitySourceMapper]
+     * could tell the target planet from the star.
      */
     private fun renderTargetHud() {
-        val targetHealth = engine.getEntitiesFor(healthFamily).firstOrNull()?.let { healthMapper.get(it) }
+        val targetHealth = healthMapper.get(targetCharacterEntity)
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
-        val text = targetHealth?.let { "Target HP: %d/%d".format(it.currentHp, it.maxHp) } ?: "Target: DEFEATED"
+        val text = if (targetHealth.isDefeated) "Target: DEFEATED" else "Target HP: %d/%d".format(targetHealth.currentHp, targetHealth.maxHp)
         val margin = HudFont.scaled(16f)
         val thirdLineY = Gdx.graphics.height - margin - HudFont.scaled(120f) // below renderHud's and renderMovementControls' lines
         HudFont.font.draw(hudBatch, text, margin, thirdLineY)
@@ -587,10 +746,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     /**
      * Fourth HUD line, top-left: the Phase 11 target planet's remaining
      * mass, or "DESTROYED" once it's been chipped down to zero. Reads
-     * [targetPlanetEntity] directly (not a family query - see that field's
-     * doc comment) since [gravitySourceMapper] would otherwise have no way
-     * to tell this planet apart from the star, which now also carries
-     * [GravitySourceComponent].
+     * [targetPlanetEntity] directly (not a family query) since
+     * [gravitySourceMapper] would otherwise have no way to tell this
+     * planet apart from the star, which now also carries
+     * [GravitySourceComponent]. Ashley's plain (non-pooled) `Engine`
+     * doesn't clear a removed entity's components, just detaches it from
+     * families/systems - so reading straight from the entity, even after
+     * [ProjectileContactListener.flushRemovals] has removed it, still
+     * correctly reflects its final state instead of throwing or going
+     * stale.
      */
     private fun renderTargetPlanetHud() {
         val source = gravitySourceMapper.get(targetPlanetEntity)
@@ -600,6 +764,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val margin = HudFont.scaled(16f)
         val fourthLineY = Gdx.graphics.height - margin - HudFont.scaled(180f) // below renderTargetHud's line
         HudFont.font.draw(hudBatch, text, margin, fourthLineY)
+        hudBatch.end()
+    }
+
+    /**
+     * Fifth HUD line, top-left: Phase 13's player HP - "Player: DEFEATED"
+     * once it hits zero. Reads [avatarEntity] directly for the same reason
+     * [renderTargetHud] reads [targetCharacterEntity] directly - two
+     * different entities now carry [HealthComponent].
+     */
+    private fun renderPlayerHud() {
+        val playerHealth = healthMapper.get(avatarEntity)
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val text = if (playerHealth.isDefeated) "Player: DEFEATED" else "Player HP: %d/%d".format(playerHealth.currentHp, playerHealth.maxHp)
+        val margin = HudFont.scaled(16f)
+        val fifthLineY = Gdx.graphics.height - margin - HudFont.scaled(240f) // below renderTargetPlanetHud's line
+        HudFont.font.draw(hudBatch, text, margin, fifthLineY)
         hudBatch.end()
     }
 

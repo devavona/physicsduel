@@ -1054,6 +1054,192 @@ entirely - same deliberately-minimal scoping as every phase before it.
    (ProjectileContactListener) are easy to retune once I know which
    direction it's off in.
 
+## Phase 12: a minimal AI opponent
+
+**Status: ✅ DONE - confirmed on-device.** First thing on the target
+side that actually acts instead of just sitting there - makes the turn
+structure (Phase 9), character health (Phase 10), and celestial mass
+(Phase 11) all mean something together for the first time, instead of
+each being testable only in isolation.
+
+- **`AiTurnController`** (new file) - waits `AI_THINK_DELAY_SECONDS` (1s,
+  pacing only) after `startTurn` is called, then fires one shot from a
+  fixed point (the same spot Phase 10's target character sits at - the AI
+  has no movement of its own yet) toward wherever the player's avatar was
+  standing *at the moment the turn started* (a snapshot, not a moving
+  target - the player can't act again until this turn ends anyway).
+  Deliberately the simplest possible aim: a straight line at
+  `AI_AIM_SPEED`, completely ignoring how gravity will curve the shot in
+  flight. No movement, no smarter targeting - purely proving the hand-off
+  itself works.
+- **`AvatarMovementController` gained an `onTurnPassed` callback**
+  (defaults to a no-op), fired from the existing `passTurn()` regardless of
+  which of its two triggers (post-shot budget hitting zero, or an early
+  Pass tap) caused it. `PlayScreen` wires this to
+  `aiTurnController.startTurn(avatarMovementController.position)`.
+- **Player input disabled during the AI's turn** - rather than teaching
+  every input class (`AvatarMovementController`, `SlingshotInputProcessor`)
+  about a "whose turn is it" flag, `PlayScreen` now builds two
+  `InputMultiplexer`s once in `show()` - `fullInputProcessor` (everything)
+  and `restrictedInputProcessor` (just `BackKeyHandler` and
+  `GravityDebugController` - pausing and the gravity-tuning tool always
+  stay available) - and swaps `Gdx.input.inputProcessor` between them on
+  the turn hand-off (`onTurnPassed`) and hand-back
+  (`AiTurnController.onTurnComplete`).
+- Turn/phase HUD line (second line, top-left) now reads
+  "Turn N - AI's turn..." while `aiTurnController.isTurnActive`, instead
+  of the usual pre-shot/post-shot budget readout.
+- **Deliberately, the player's avatar still cannot actually be hit.** It
+  has never had a Box2D body of its own (`launchPoint`/the debug marker
+  circle track `AvatarMovementController`'s position, but nothing
+  physical exists there for a projectile to collide with), so an AI shot
+  that reaches the avatar's location just... passes through, or hits the
+  launch planet behind it. Giving the avatar a real (kinematically-moved,
+  not physics-simulated) body plus its own `HealthComponent` is real,
+  scoped future work - deliberately split out rather than bundled into
+  this phase, so "the turn hands off and the AI can act" could be proven
+  and tested on its own first.
+- Known cosmetic gap: the move/Pass buttons are still drawn during the
+  AI's turn (just non-functional, since their input processor isn't
+  active) rather than visually greyed out or hidden - acceptable for this
+  testing phase, not fixed here.
+- **First on-device test found a real bug: the AI's shot visually
+  originated from the player's own position, not the target planet.**
+  Root cause: `PlayScreen.fireMissile()` always spawned the missile at the
+  shared `launchPoint` field (continuously synced to the player avatar's
+  position every frame) regardless of who called it - passing the same
+  function as `onFire` to both `SlingshotInputProcessor` (player) and
+  `AiTurnController` (AI) meant the AI's computed aim/velocity was correct,
+  but the spawn location was wrong. **Fix:** `fireMissile` now takes an
+  explicit `origin: Vector2` parameter instead of reading `launchPoint`
+  itself - the player's call site passes `launchPoint`, the AI's passes
+  `aiLaunchPoint`. Not yet re-confirmed on-device.
+- **Status: ✅ DONE - confirmed on-device.** The origin-fix was never
+  re-tested in isolation, but Phase 13's testing necessarily exercises the
+  same `fireMissile` code path on every AI turn, and Boo reported no
+  problem with shot origin - treated as confirmed.
+
+### How to test Phase 12 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Play a turn as usual - move (optional), fire a shot,
+   move again (optional), then either exhaust your post-shot budget or
+   tap Pass.
+3. The moment your turn ends, the turn/phase HUD line should switch to
+   "Turn N - AI's turn...", and your move buttons and aiming should stop
+   responding to touch entirely (Back and the gravity-tuning buttons
+   should still work, though).
+4. After about a second, a missile should launch on its own from near the
+   target planet, heading roughly toward wherever your avatar was
+   standing, curving under gravity same as your own shots do (the AI
+   doesn't compensate for that curve, so it may miss more often than a
+   human aiming carefully would - that's expected, not a bug).
+5. Once the AI's shot resolves (hits something, or the projectile is
+   otherwise removed), control should return to you: the HUD line goes
+   back to "Turn N+1 - Pre-shot: 5 left", and your move/aim input works
+   again.
+6. Confirm the AI's shot behaves exactly like your own on impact - if it
+   hits the target character or planet, existing Phase 10/11 damage
+   applies (it could, in principle, damage its own side's target/planet
+   if the shot curves back into them - a known quirk, not guarded against
+   this phase). If it reaches roughly where your avatar is standing,
+   confirm nothing happens (no damage, no HUD change) - expected per the
+   "avatar can't be hit yet" scope note above.
+7. If the AI's think-delay feels too long/short, or its shot speed feels
+   way off (always falls hopelessly short or flies way past everything),
+   tell me what it looked like - `AI_THINK_DELAY_SECONDS` and
+   `AI_AIM_SPEED` (both in `PlayScreen`) are easy to retune.
+
+## Phase 13: the player's avatar can take damage
+
+**Status: ✅ DONE - confirmed on-device.** Closes the gap Phase 12
+deliberately left open - the avatar can now actually be hit, making this
+the first phase where a full player-vs-AI exchange (move, shoot, get shot
+back at, take damage) is possible end to end.
+
+- **The avatar now has a real Box2D body** (`avatarBody`, new) - Kinematic,
+  not Dynamic or Static: it moves entirely under
+  `AvatarMovementController`'s direct control (button taps), never under
+  physics forces, so Kinematic is the body type actually meant for "moves
+  via direct position control but still participates in collision
+  detection." `render()` keeps its position synced to
+  `AvatarMovementController`'s logical position every frame
+  (`avatarBody.setTransform(...)`), the same place `launchPoint` already
+  was.
+- **Tagged `HealthComponent(AVATAR_MAX_HP)`** (100, matching the target) -
+  since `ProjectileContactListener`'s damage dispatch (Phase 10/11) was
+  already generic (whichever component the hit entity carries decides what
+  happens), **no changes were needed there at all** for the avatar to
+  become damageable.
+- **A new self-collision problem this exposed, and its fix:** a missile
+  spawns exactly at its firer's own position (`launchPoint` for the
+  player, `aiLaunchPoint` for the AI) - harmless when nothing physical
+  existed there, but now that both the avatar and the target character
+  have real fixtures sitting exactly there, a freshly-fired missile would
+  otherwise immediately, physically collide with (and bounce off) its own
+  firer the instant it's created. Fixed with Box2D collision-filter
+  categories (`CATEGORY_PLAYER_AVATAR`, `CATEGORY_AI_TARGET`) and a new
+  `fireMissile(origin, velocity, excludeCategory)` parameter - each side's
+  missile excludes only its own firer's category via `maskBits`, so it
+  still collides normally with everything else (including the *other*
+  side's character, planets, the star).
+- Two entities now carry `HealthComponent` (target character + avatar), so
+  the HUD methods that used to find "the" health/gravity-source entity via
+  a family query (`renderTargetHud`, already the pattern
+  `renderTargetPlanetHud` used for the star-vs-planet ambiguity) now read
+  `targetCharacterEntity`/`avatarEntity` directly instead - both newly
+  captured as fields (the target character's was previously created
+  anonymously).
+- New fifth HUD line, top-left: "Player HP: X/100", switching to
+  "Player: DEFEATED" once it hits zero - same format as the target's line.
+- Deliberately NOT yet included: any actual game-over/win-loss flow when
+  either side is fully defeated (both sides can currently drop to 0 HP and
+  just... stay that way, with a "DEFEATED" label and no further
+  consequence) - that needs a real squad/roster concept first (per the
+  "Core gameplay loop" entry's win condition: *every* character on a side,
+  not just one) and is future work once squads exist.
+
+### How to test Phase 13 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. Fifth line, top-left (below Target Planet Mass): "Player
+   HP: 100/100".
+3. Fire a shot as usual - confirm it does NOT immediately vanish/hit
+   anything the instant you release (the self-collision-with-your-own-
+   avatar bug this phase's filtering prevents) - it should fly and curve
+   normally, exactly as before.
+4. Complete your turn (exhaust post-shot steps or tap Pass) and let the
+   AI take its turn. If its shot actually reaches your avatar's current
+   position, the Player HP line should drop by 25 (to "75/100") and
+   Logcat (tag `ProjectileContactListener`) should show a "Hit -
+   75/100 HP remaining" line - confirms the AI can now actually hurt you.
+5. Keep taking hits (may take several AI turns, since its aim is simple
+   and won't always connect). After Player HP reaches 0, the HUD line
+   should read "Player: DEFEATED" - and, per the scope note above, nothing
+   else should happen (no game-over screen, you can still technically keep
+   playing) - that's expected for this phase, not a bug.
+6. Confirm firing a shot yourself still only ever damages the *target*
+   character/planet, never your own avatar, and vice versa for the AI's
+   shots - the collision-filter fix should make each side's missile
+   invisible to its own character, not to the opposing one.
+7. If the avatar's hitbox feels too small/large relative to the visible
+   cyan marker, or 100 HP / 25 damage-per-hit feels like the wrong pace
+   for how often the AI actually lands a hit, tell me what it looked/felt
+   like - `AVATAR_RADIUS`, `AVATAR_MAX_HP` (`PlayScreen`), and
+   `MISSILE_DAMAGE` (`ProjectileContactListener`) are easy to retune.
+
+**Confirmed working on-device (Sept 2026):** damage mechanic itself
+lands correctly (HP drops, DEFEATED shows). Boo's feedback: "there is
+not intelligence to the shot back. its just starting at the player dot
+even if on other side of planet" - the AI's straight-line aim (the
+Phase 12 simplification, documented above) doesn't account for the
+planet potentially blocking a direct line to the player, so it takes
+shots that visibly can't connect. Confirmed as real feedback, not yet
+scoped into a phase - candidate for a future "smarter AI aim" phase
+(options include: skip/delay firing when line-of-sight to the target is
+blocked by a planet, sample a few candidate launch angles and pick one
+whose *simulated* (gravity-curved) trajectory has a clear path, or both).
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
