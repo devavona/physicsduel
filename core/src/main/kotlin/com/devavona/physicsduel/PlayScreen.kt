@@ -89,6 +89,23 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * (and physically bounce off) that same firer the instant it's created -
  * see [fireMissile]'s `excludeCategory` parameter.
  *
+ * **Phase 14 milestone: the AI checks its shot before taking it.**
+ * [AiTurnController] no longer just fires blind from a fixed spot -
+ * [aiTurnController] now searches nearby angles around the target planet
+ * (the same step-budget the player gets) for one with a clear line to the
+ * player, and only falls back to firing blind if nothing in range is
+ * fully clear. [targetCharacterBody] changes from Static to Kinematic (see
+ * [avatarBody]'s doc comment for why that body type) so it can actually
+ * move there. See PROJECT_STATE.md's "Phase 14" entry for the full scope.
+ *
+ * **Phase 15 milestone: the AI's aim is gravity-aware.** [aiTurnController]
+ * no longer always fires a straight line at the target - it now sweeps a
+ * range of aim angles/speeds and actually simulates each candidate's
+ * gravity-curved flight (using the exact math [GravitySystem.applyForces]
+ * itself uses, via [GravitySystem.currentSources]/[GravitySystem.G]/
+ * [GravitySystem.MIN_DISTANCE]) before picking whichever gets closest to
+ * the target. See PROJECT_STATE.md's "Phase 15" entry for the full scope.
+ *
  * [DragInputProcessor] is no longer wired up here - nothing in this
  * milestone's scene is tagged [DraggableComponent] anymore, since the demo
  * body it used to drag is gone. The class itself is untouched and stays in
@@ -139,6 +156,36 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val AI_AIM_SPEED = 8f
         private const val AI_THINK_DELAY_SECONDS = 1f
 
+        // Phase 15 - gravity-aware aim search tuning, illustrative/not
+        // tuned. angleSearchDegrees/angleStepDegrees sweep +-120 degrees
+        // around the AI's own outward-facing direction (away from its own
+        // planet - see AiTurnController.searchAim's doc comment for why
+        // it's centered there and not on the straight line to the target)
+        // in 8-degree steps (31 angles); speedMultipliers additionally
+        // tries each of those at 0.7x/1x/1.3x AI_AIM_SPEED (3 speeds) -
+        // ~93 candidate shots total, each simulated forward for up to
+        // AI_TRAJECTORY_SIM_MAX_SECONDS at AI_TRAJECTORY_SIM_STEP_SECONDS
+        // per step (matching PhysicsSystem.TIME_STEP so the simulated
+        // path tracks the real one closely). All comfortably cheap - this
+        // runs once per AI turn, well within AI_THINK_DELAY_SECONDS.
+        // 120 degrees is a deliberately generous (not exactly computed)
+        // margin under the true "still clear of my own planet" limit for
+        // this scene's PLANET_RADIUS/LAUNCH_POINT_CLEARANCE (geometrically
+        // about +-133 degrees from outward) - covers everything actually
+        // launchable without wasting candidates on directions guaranteed
+        // to immediately clip the AI's own planet.
+        private const val AI_AIM_ANGLE_SEARCH_DEGREES = 120f
+        private const val AI_AIM_ANGLE_STEP_DEGREES = 8f
+        private val AI_AIM_SPEED_MULTIPLIERS = listOf(0.7f, 1f, 1.3f)
+        private const val AI_TRAJECTORY_SIM_MAX_SECONDS = 4f
+        private const val AI_TRAJECTORY_SIM_STEP_SECONDS = 1f / 60f
+
+        // Visual polish, not a new mechanic - see TrailComponent's doc
+        // comment. 90 points at one recorded per render frame is ~1.5
+        // seconds of trail at 60fps - long enough to show a full arc for
+        // most shots without needing to also track elapsed time.
+        private const val TRAIL_MAX_POINTS = 90
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -188,6 +235,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // facing the target planet to its right.
         private const val AVATAR_START_ANGLE_DEGREES = 90f
 
+        // Phase 14 - the AI's own starting angle around the target planet.
+        // Numerically identical to AVATAR_START_ANGLE_DEGREES (both mean
+        // "top of the planet, facing the other side") - kept as a separate
+        // constant since the two sides are independent and coincidence
+        // isn't the same as a shared meaning.
+        private const val AI_START_ANGLE_DEGREES = 90f
+
         // Converts a pull-back drag distance (world units) into launch
         // speed, clamped to MAX_MISSILE_SPEED so a wild drag can't fire an
         // unreasonably fast shot.
@@ -204,7 +258,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var slingshotInputProcessor: SlingshotInputProcessor
     private lateinit var avatarMovementController: AvatarMovementController
     private lateinit var aiTurnController: AiTurnController
-    private lateinit var aiLaunchPoint: Vector2
 
     // Phase 13 - the avatar's own physics body. Kinematic, not dynamic:
     // the avatar moves under AvatarMovementController's direct control
@@ -219,6 +272,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var avatarBody: Body
     private lateinit var avatarEntity: Entity
     private lateinit var targetCharacterEntity: Entity
+    // Phase 14 - Kinematic now, not Static (see avatarBody's doc comment
+    // for why Kinematic is the right body type for "moves under direct
+    // control, still collidable"), since aiTurnController can now
+    // reposition it. Position kept in sync every frame in render(), the
+    // same place avatarBody's is.
+    private lateinit var targetCharacterBody: Body
 
     // Built once in show(), swapped between on a turn hand-off (see
     // avatarMovementController's onTurnPassed / aiTurnController's
@@ -246,7 +305,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val physicsBodyMapper = ComponentMapper.getFor(PhysicsBodyComponent::class.java)
     private val healthMapper = ComponentMapper.getFor(HealthComponent::class.java)
     private val gravitySourceMapper = ComponentMapper.getFor(GravitySourceComponent::class.java)
+    private val trailMapper = ComponentMapper.getFor(TrailComponent::class.java)
     private val gravityAffectedFamily = Family.all(GravityAffectedComponent::class.java, PhysicsBodyComponent::class.java).get()
+    private val trailFamily = Family.all(TrailComponent::class.java, PhysicsBodyComponent::class.java).get()
     // A direct reference, not a family query, because the star also carries
     // GravitySourceComponent now - a family query alone couldn't tell the
     // HUD which one to read. Kept even after the entity is removed from the
@@ -301,8 +362,45 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         engine.addEntity(targetPlanetEntity)
 
+        // Phase 14 - built here (before the target character body) since
+        // createTarget() below now seeds the body's position from
+        // aiTurnController.position instead of a separately-hardcoded
+        // formula. obstacles are fixed geometry (center + radius), not
+        // live Box2D references - see AiTurnController.Obstacle's doc
+        // comment; a destroyed target planet (Phase 11) still counts as an
+        // obstacle here, a known minor gap, not addressed this phase.
+        aiTurnController = AiTurnController(
+            planetCenter = Vector2(TARGET_PLANET_X, PLANETS_Y),
+            planetRadius = PLANET_RADIUS,
+            heightAboveSurface = LAUNCH_POINT_CLEARANCE,
+            stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
+            stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
+            startAngleDegrees = AI_START_ANGLE_DEGREES,
+            aimSpeed = AI_AIM_SPEED,
+            thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
+            obstacles = listOf(
+                AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
+                AiTurnController.Obstacle(Vector2(LAUNCH_PLANET_X, PLANETS_Y), PLANET_RADIUS),
+                AiTurnController.Obstacle(Vector2(TARGET_PLANET_X, PLANETS_Y), PLANET_RADIUS)
+            ),
+            aimSearch = AiTurnController.AimSearchConfig(
+                angleSearchDegrees = AI_AIM_ANGLE_SEARCH_DEGREES,
+                angleStepDegrees = AI_AIM_ANGLE_STEP_DEGREES,
+                speedMultipliers = AI_AIM_SPEED_MULTIPLIERS,
+                simMaxSeconds = AI_TRAJECTORY_SIM_MAX_SECONDS,
+                simStepSeconds = AI_TRAJECTORY_SIM_STEP_SECONDS
+            ),
+            gravitationalConstant = GravitySystem.G,
+            gravityMinDistance = GravitySystem.MIN_DISTANCE,
+            gravityMultiplier = { gravitySystem.gravityMultiplier },
+            gravitySources = { gravitySystem.currentSources() },
+            onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
+            onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
+        )
+
+        targetCharacterBody = createTarget(aiTurnController.position)
         targetCharacterEntity = Entity().apply {
-            add(PhysicsBodyComponent(createTarget()))
+            add(PhysicsBodyComponent(targetCharacterBody))
             add(HealthComponent(TARGET_MAX_HP))
         }
         engine.addEntity(targetCharacterEntity)
@@ -341,18 +439,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             }
         )
         gravityDebugController = GravityDebugController(gravitySystem)
-
-        // Same fixed spot Phase 10's target character stand-in sits at -
-        // the AI has no movement of its own yet (see the class doc
-        // comment), so its shots always originate from here.
-        aiLaunchPoint = Vector2(TARGET_PLANET_X, PLANETS_Y + PLANET_RADIUS + LAUNCH_POINT_CLEARANCE)
-        aiTurnController = AiTurnController(
-            launchPoint = aiLaunchPoint,
-            aimSpeed = AI_AIM_SPEED,
-            thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
-            onFire = { velocity -> fireMissile(aiLaunchPoint, velocity, excludeCategory = CATEGORY_AI_TARGET) },
-            onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
-        )
     }
 
     override fun show() {
@@ -426,24 +512,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Phase 10's stand-in for an opposing character: a small static body
-     * sitting above the target planet's surface (same clearance as the
-     * avatar's launch point), tagged [HealthComponent] by the caller so
-     * [ProjectileContactListener] can damage it on a direct hit.
-     * Deliberately not a full character yet - no movement, no turn
-     * structure, no AI - this phase is purely about proving the
-     * hit-damage-defeat mechanic itself before a real character carries it.
+     * The AI's own body - tagged [HealthComponent] by the caller so
+     * [ProjectileContactListener] can damage it on a direct hit, same
+     * mechanic Phase 10 introduced this stand-in target for. [Kinematic],
+     * not Static, since Phase 14 lets [aiTurnController] reposition it -
+     * see [avatarBody]'s doc comment for why Kinematic is the right body
+     * type for "moves under direct control, still collidable". [render]
+     * keeps its position synced to [aiTurnController]'s logical position
+     * every frame after [initialPosition] seeds it.
      */
-    private fun createTarget(): Body {
+    private fun createTarget(initialPosition: Vector2): Body {
         val bodyDef = BodyDef().apply {
-            type = BodyDef.BodyType.StaticBody
-            position.set(TARGET_PLANET_X, PLANETS_Y + PLANET_RADIUS + LAUNCH_POINT_CLEARANCE)
+            type = BodyDef.BodyType.KinematicBody
+            position.set(initialPosition)
         }
         val body = world.createBody(bodyDef)
         val shape = CircleShape().apply { radius = TARGET_RADIUS }
         // Phase 13: tagged CATEGORY_AI_TARGET so the AI's own missile (which
-        // spawns exactly here - see aiLaunchPoint) can exclude colliding
-        // with it - see fireMissile's excludeCategory parameter.
+        // spawns from aiTurnController.position, wherever that currently is)
+        // can exclude colliding with it - see fireMissile's excludeCategory
+        // parameter.
         val fixtureDef = FixtureDef().apply {
             this.shape = shape
             filter.categoryBits = CATEGORY_AI_TARGET
@@ -484,7 +572,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * spawns the body/entity, it doesn't know about pull vectors, power
      * scaling, or whose turn it is). [origin] used to be hardcoded to
      * [launchPoint] - a real Phase 12 bug, since that meant the AI's shots
-     * spawned from the player's own position instead of [aiLaunchPoint].
+     * spawned from the player's own position instead of the AI's.
      * Tagged [GravityAffectedComponent] so [GravitySystem] curves its
      * flight, and [ProjectileComponent] so [ProjectileContactListener]
      * knows to remove it on impact instead of leaving it as a permanent
@@ -525,6 +613,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 add(PhysicsBodyComponent(body))
                 add(GravityAffectedComponent())
                 add(ProjectileComponent())
+                add(TrailComponent(TRAIL_MAX_POINTS))
             }
         )
     }
@@ -537,6 +626,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // rather than being fixed once at construction like Phase 8's was.
         launchPoint.set(avatarMovementController.position)
         avatarBody.setTransform(avatarMovementController.position, 0f)
+        // Phase 14 - aiTurnController.position can change the instant
+        // startTurn() runs (see its reposition()), so this needs to be
+        // synced every frame same as avatarBody just above, not only once.
+        targetCharacterBody.setTransform(aiTurnController.position, 0f)
         aiTurnController.update(delta)
 
         engine.update(delta) // drives PhysicsSystem, which owns the fixed-timestep accumulator
@@ -545,6 +638,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // engine.update above is exactly that point, since PhysicsSystem's
         // step loop is synchronous.
         projectileContactListener.flushRemovals(world)
+
+        for (entity in engine.getEntitiesFor(trailFamily)) {
+            trailMapper.get(entity).recordPosition(physicsBodyMapper.get(entity).body.position)
+        }
 
         Gdx.gl.glClearColor(0.043f, 0.071f, 0.126f, 1f) // deep space navy
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
@@ -563,6 +660,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         camera.update()
         debugRenderer.render(world, camera.combined)
         renderDebugOverlay()
+        renderProjectileTrails()
 
         // Bug found on-device (Fold 8, unfolded/landscape-wide screen):
         // every HUD element (buttons, text) is drawn via [hudCamera], whose
@@ -604,6 +702,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             shapeRenderer.color = Color.YELLOW
             val dragPoint = Vector2(launchPoint).add(pull)
             shapeRenderer.line(launchPoint, dragPoint)
+        }
+        shapeRenderer.end()
+    }
+
+    /**
+     * Draws each live projectile's recorded [TrailComponent] history as a
+     * solid line - purely visual (see that component's doc comment). Added
+     * directly in response to Boo's Phase 15 feedback: even with the AI's
+     * new gravity-aware aim search actually choosing curved shots, the
+     * curve itself was too subtle to see at a glance without a drawn
+     * trail to compare against a straight line.
+     */
+    private fun renderProjectileTrails() {
+        shapeRenderer.projectionMatrix = camera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Line)
+        shapeRenderer.color = Color.ORANGE
+        for (entity in engine.getEntitiesFor(trailFamily)) {
+            val points = trailMapper.get(entity).points
+            for (i in 0 until points.size - 1) {
+                shapeRenderer.line(points[i], points[i + 1])
+            }
         }
         shapeRenderer.end()
     }

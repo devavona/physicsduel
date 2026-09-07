@@ -62,9 +62,12 @@ class GravitySystem(engine: Engine) {
          * to unbounded velocity the instant it grazed the star). Clamping
          * the distance used in the force calculation - not the body's actual
          * position - caps the maximum pull without teleporting or otherwise
-         * interfering with the body itself.
+         * interfering with the body itself. Not `private` (Phase 15):
+         * [AiTurnController]'s trajectory prediction re-implements this
+         * exact clamp so its simulated flight matches what [applyForces]
+         * will actually do to the real missile.
          */
-        private const val MIN_DISTANCE = 0.5f
+        const val MIN_DISTANCE = 0.5f
     }
 
     /**
@@ -127,5 +130,25 @@ class GravitySystem(engine: Engine) {
                 affectedBody.applyForceToCenter(force, true)
             }
         }
+    }
+
+    /**
+     * Phase 15 - a snapshot of every current gravity source's world
+     * position and mass, read fresh each call from the same live
+     * [sourceEntities] [applyForces] itself uses. [AiTurnController]'s
+     * trajectory prediction uses this (together with [G], [MIN_DISTANCE],
+     * and [gravityMultiplier]) to simulate a candidate shot's flight
+     * without needing a real Box2D body to do it - see that class for why
+     * a plain point-mass integrator can reuse this data directly (gravity
+     * is mass-independent for the body being pulled).
+     */
+    fun currentSources(): List<Pair<Vector2, Float>> {
+        val result = ArrayList<Pair<Vector2, Float>>()
+        for (source in sourceEntities) {
+            val sourceBody = physicsBodyMapper.get(source).body
+            val mass = gravitySourceMapper.get(source).mass
+            result.add(Vector2(sourceBody.position) to mass)
+        }
+        return result
     }
 }

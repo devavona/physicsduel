@@ -1240,6 +1240,203 @@ scoped into a phase - candidate for a future "smarter AI aim" phase
 blocked by a planet, sample a few candidate launch angles and pick one
 whose *simulated* (gravity-curved) trajectory has a clear path, or both).
 
+## Phase 14: the AI checks its shot before taking it
+
+**Status: ✅ DONE - confirmed on-device.** Directly answers Boo's
+Phase 13 feedback: "there is not intelligence to the shot back. its just
+starting at the player dot even if on other side of planet." Picks the
+"line-of-sight gate" direction, combined with letting the AI actually move
+to try to clear that gate rather than just holding fire when blocked.
+
+- **`AiTurnController` gains its own position and movement**, mirroring
+  `AvatarMovementController`: an `angleDegrees` around the target planet's
+  center, at the same fixed height above its surface the AI's spot has
+  always been at, with a `position` getter using the identical formula.
+  It's no longer a fixed point - it's a body that can move around its own
+  planet, just like the player's avatar can move around the launch planet.
+- **Before firing, it searches for a clear shot.** `reposition()` tries
+  candidate angles - current position first, then ±1 step, ±2 steps, up to
+  ±`stepsPerPhase` steps (reusing the player's own movement budget: 5 steps
+  of 15 degrees, so up to 75 degrees either direction) - checking each
+  candidate's straight-line path to the player's snapshotted position
+  against three obstacles: the star, the launch planet, and the target
+  planet itself. The first fully-clear candidate wins; trying closest-first
+  means a shot that was already clear (the common case) costs no movement
+  at all - the AI only relocates when it actually needs to. If nothing in
+  range is fully clear, it fires anyway from whichever candidate had the
+  least obstruction, rather than refusing to act and stalling the game.
+- **The target character's body is now Kinematic, not Static** (same body
+  type change Phase 13 made for the avatar, and for the same reason - it
+  needs to actually move under direct control while staying collidable).
+  `PlayScreen` syncs its position to `aiTurnController.position` every
+  frame, same pattern as `avatarBody`.
+- **`aiLaunchPoint` (the old fixed spot) is gone** - the AI's own current
+  `position` is now the single source of truth for both where its body is
+  drawn and where its shot spawns from, so `fireMissile`'s `onFire` lambda
+  now receives an explicit `origin` from `AiTurnController` instead of
+  closing over a separately-tracked field.
+- **Still deliberately simple, on purpose:** the obstruction check is a
+  straight-line-vs-circle test, not a simulation - it finds an angle with
+  an unblocked *straight* line to the player, but the actual missile still
+  flies a gravity-curved path, so a "clear" straight line doesn't guarantee
+  the real shot won't clip something after launch (and conversely, a shot
+  that looks blocked in a straight line might actually curve around the
+  obstacle just fine - the AI doesn't know that). It also doesn't yet
+  account for the target planet being partially destroyed (Phase 11's
+  mutable mass/`isDestroyed`) - a destroyed planet still counts as a full
+  obstacle here, a known minor gap. A genuinely smarter aim - simulating
+  candidate trajectories under real gravity the way a human eventually
+  learns to arc a shot around a planet - is real future work.
+- **No animation yet** - repositioning happens instantly the moment the
+  turn hands off (during `startTurn`, before the usual `AI_THINK_DELAY_SECONDS`
+  pause even starts counting down), not as a visible step-by-step walk.
+  Boo will see the target marker jump to its new spot right away, then a
+  beat, then the shot - not smoothly slide there. Matches the project's
+  existing style (the player's own movement isn't animated/tweened either
+  - button taps jump the angle directly), just noting it since this is the
+  first time the AI's position visibly changes at all.
+
+### How to test Phase 14 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Play a turn where you deliberately move your avatar to the far side of
+   the launch planet (away from the target planet) before ending your
+   turn (fire or Pass) - the exact scenario Boo's feedback described.
+3. Watch the target marker (on the target planet) the moment your turn
+   ends: if your position is blocked by the launch planet from the AI's
+   usual spot, the target marker should visibly jump to a new spot around
+   the target planet before the AI fires (roughly a second later, same
+   pacing as before) - confirms the AI actually repositioned instead of
+   firing blind from the same place every time.
+4. If you stay on the near side (already has a clear shot to the AI's
+   usual spot), the target marker should NOT move at all before firing -
+   confirms the AI only relocates when it actually needs to, not every
+   turn.
+5. Play several more turns, moving to different spots each time (near
+   side, far side, extreme angles) - the AI's shot should now noticeably
+   more often actually reach roughly toward you instead of just plowing
+   straight into the launch planet immediately after leaving the target
+   planet.
+6. It won't be perfect - the AI still doesn't compensate for gravity's
+   curve, so some shots will still miss even with a "clear" straight-line
+   angle chosen; that's expected, not a bug, per the scope note above.
+7. If the AI's reposition ever looks wrong - jumps somewhere that's
+   obviously still blocked, or moves when it didn't need to, or the
+   instant jump feels too jarring - tell me what it looked like.
+
+## Phase 15: the AI's aim is gravity-aware
+
+**Status: ✅ DONE - confirmed on-device.** The outward-centered aim-search
+fix (see below) was re-tested and confirmed better. Answers the other half of
+Boo's Phase 13 feedback ("there is not intelligence to the shot back") -
+Phase 14 fixed the "fires blind through a planet" case, but even from a
+spot with a clear *straight* line, the real missile still curves under
+gravity, so a shot aimed straight at the target could still miss. This
+phase gives the AI a genuine, if still bounded, aim search instead of
+always computing one straight-line velocity.
+
+- **`AiTurnController.searchAim`** (new) replaces the old one-line
+  "velocity = direction to target * aimSpeed" with a real search: it
+  sweeps aim angle ±45° around that same straight-line direction in 5°
+  steps (19 angles), and at each angle also tries 3 speeds (0.7x/1x/1.3x
+  `AI_AIM_SPEED`) - 57 candidate shots in total, all cheap enough to run
+  well within the existing `AI_THINK_DELAY_SECONDS` pause.
+- **Each candidate is actually simulated, not guessed.**
+  `simulateClosestApproach` (new) runs a lightweight point-mass physics
+  integrator - the exact same inverse-square gravity formula
+  `GravitySystem.applyForces` itself uses, stepped at the same 1/60s tick
+  - forward in time for each candidate, tracking how close it gets to the
+  target and stopping early if it first hits an obstacle (the star or
+  either planet), since a real missile would be destroyed there. No real
+  Box2D body is needed for this - gravity's pull on a body doesn't depend
+  on that body's own mass (a feather and a bowling ball fall at the same
+  rate), so a plain Vector2-based simulation is enough to predict it.
+- **`GravitySystem` gained `currentSources()`** - a snapshot of every
+  active gravity source's live position and mass, read the same way
+  `applyForces` itself reads them. `MIN_DISTANCE` is no longer private, so
+  the simulation's clamp exactly matches the real one. Together with `G`
+  and the live `gravityMultiplier`, this is everything the simulation
+  needs, fetched fresh once per AI turn (not once per candidate or per
+  simulated step - nothing changes mid-search) so the prediction is never
+  stale relative to whatever's currently live - including Boo's own
+  on-device gravity-multiplier tuning, and a target planet that's been
+  partially destroyed and pulls weaker as a result.
+- **Deliberately still bounded, not a full optimizer:** a fixed 57-shot
+  sweep, not an exhaustive or adaptive search - a genuinely better shot
+  that falls outside that angle/speed range simply won't be found. It also
+  still runs *after* Phase 14's position search, not together with it - the
+  AI picks where to stand using the old straight-line-only obstruction
+  check, then picks how to aim from there using the new gravity-aware one;
+  a combined position+aim search (potentially finding a spot AND an arc
+  neither phase would find alone) is real future work, not this phase.
+- **Added after first on-device look: a drawn flight trail.** Boo's first
+  reaction to the aim search was "if it is curving it's very difficult to
+  tell" - fair, since nothing before this drew the missile's actual path,
+  only its current position. `TrailComponent` (new, in `Components.kt`)
+  records each projectile's last `TRAIL_MAX_POINTS` (90, ~1.5s at 60fps)
+  positions every frame; `PlayScreen.renderProjectileTrails()` draws that
+  history as a solid orange line, so the curve (or lack of one) is now
+  directly visible instead of only inferable. Purely visual - doesn't
+  change any physics or aim logic. Also added: a one-line Logcat diagnostic
+  (tag `AiTurnController`) every time the AI fires, logging exactly how far
+  its chosen aim deviates from a straight line (degrees), its chosen speed,
+  and the predicted closest approach - hard numbers to check against the
+  trail if the visual still isn't conclusive.
+- **First real on-device test found a real bug: the AI didn't try to curve
+  around its own planet.** Boo confirmed the player's own shots genuinely
+  curve (walked to the far side of the launch planet and fired a shot
+  around the star to connect), but then moved the AI to the far side of
+  *its own* planet and it "still, more or less, fired in the same
+  direction... like it didn't notice the planet it was on." Root cause:
+  the aim search swept +-45 degrees around a straight line drawn toward
+  the target - but from the far side of its own planet, that straight
+  line points directly *into* the planet, so every candidate near it
+  self-collided in the first simulated step or two. None of them could
+  ever beat the useless straight-line default the search started with, so
+  the AI ended up firing that same straight (and wrong) shot every time
+  from that stance. **Fix:** the sweep is now centered on the AI's own
+  outward-facing direction (`angleDegrees` itself - away from its own
+  planet's center, guaranteed clear of self-collision at the start of
+  every candidate) instead of the straight line to the target, and widened
+  from +-45 to +-120 degrees so it still comfortably covers the
+  straight-line direction whenever *that's* actually clear (the common
+  case). Re-tested on-device and confirmed better.
+
+### How to test Phase 15 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Play several turns, varying your avatar's position each time (near
+   side of the launch planet, far side, in between). Watch the orange
+   trail drawn behind each missile (yours and the AI's) as it flies - it
+   should visibly bend, more so on some shots than others, rather than
+   staying a perfectly straight line. Watch how often the AI's shots now
+   actually travel toward you and curve sensibly, versus before (Phase
+   12-14) where a "clear line" shot still flew perfectly straight and
+   often missed a moving/angled target.
+3. Specifically try a position where a straight line to the AI would
+   graze past the edge of the launch planet (not fully blocked, just
+   close) - Phase 14's reposition might leave the AI there since the
+   straight line is technically clear, but Phase 15's aim search should
+   now be able to angle the shot to actually connect better, or at least
+   visibly try a non-straight path (watch the missile's curve as it
+   flies).
+4. This costs a little more "thinking" time per AI turn (57 simulated
+   candidate shots) - confirm the AI's turn still feels reasonably snappy
+   and doesn't introduce a noticeable extra pause/stutter beyond the
+   existing `AI_THINK_DELAY_SECONDS` beat.
+5. It still won't hit you every time - the search is bounded (±45°, 3
+   speeds - see the scope note above), and it's still choosing based on a
+   fixed snapshot of where you were standing, not tracking you live. Missed
+   shots are expected, not a bug - what should change is that misses now
+   look like genuine attempts (curving plausibly toward you) rather than
+   the old "beelines straight through the planet in front of it" failure
+   mode.
+6. If the AI's shots still look "dumb" in a specific way, or the extra
+   think-time feels too long, tell me exactly what you saw -
+   `AI_AIM_ANGLE_SEARCH_DEGREES`, `AI_AIM_ANGLE_STEP_DEGREES`,
+   `AI_AIM_SPEED_MULTIPLIERS`, and `AI_TRAJECTORY_SIM_MAX_SECONDS` (all in
+   `PlayScreen`) are easy to retune.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

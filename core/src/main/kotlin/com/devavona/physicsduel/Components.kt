@@ -1,6 +1,7 @@
 package com.devavona.physicsduel
 
 import com.badlogic.ashley.core.Component
+import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.physics.box2d.Body
 
 /**
@@ -83,4 +84,21 @@ class HealthComponent(val maxHp: Int, currentHp: Int = maxHp) : Component {
     }
 
     val isDefeated: Boolean get() = currentHp <= 0
+}
+
+/**
+ * A short, fixed-length history of recent world positions - purely visual,
+ * not physics-affecting. Added so a projectile's gravity-curved flight path
+ * (real since Phase 8, but easy to miss at a glance - especially Phase 15's
+ * AI aim search, whose whole point is choosing a curve over a straight
+ * line) is actually visible on screen as a drawn trail instead of only
+ * inferable from start/end points - see PlayScreen.renderProjectileTrails.
+ */
+class TrailComponent(private val maxPoints: Int) : Component {
+    val points = ArrayDeque<Vector2>()
+
+    fun recordPosition(position: Vector2) {
+        points.addLast(Vector2(position))
+        while (points.size > maxPoints) points.removeFirst()
+    }
 }
