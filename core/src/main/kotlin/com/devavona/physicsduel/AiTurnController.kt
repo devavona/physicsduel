@@ -111,12 +111,6 @@ class AiTurnController(
 
     private val trajectorySimulator = TrajectorySimulator(gravitationalConstant, gravityMinDistance)
 
-    // AI accuracy pass - reposition() stops scanning further candidate
-    // positions once one predicts an approach this close (world units) -
-    // effectively already a direct hit, nothing meaningful left to gain
-    // by continuing to search the rest of the movement budget.
-    private val repositionGoodEnoughApproach = 0.25f
-
     /** One circular obstacle a simulated shot can collide with - see [simulateClosestApproach]. Fixed geometry (a planet/star's center+radius), not a live Box2D reference. */
     data class Obstacle(val center: Vector2, val radius: Float)
 
@@ -169,19 +163,30 @@ class AiTurnController(
     }
 
     /**
-     * AI accuracy pass - searches candidate positions around
-     * [planetCenter], closest-first (same 0, +-1 step, +-2 steps... up to
-     * +-[stepsPerPhase] pattern as before), for whichever gives the best
-     * PREDICTED SHOT via [bestAimFor] - not just an unobstructed straight
-     * line like the old [obstructionSeverity]-based version. Movement and
-     * aiming are now judged by the exact same yardstick: the same
-     * gravity-aware simulation [searchAim] itself uses to score a shot.
-     * Stops early once a candidate's predicted approach is already
-     * essentially a direct hit ([repositionGoodEnoughApproach]) -
-     * there's nothing meaningfully better to keep searching for - and
-     * otherwise falls back to whichever candidate scored best across the
-     * full budget, same "always end up somewhere reasonable" guarantee
-     * as before.
+     * AI accuracy pass, take two. The original version only ever looked
+     * at candidate positions reachable *this turn* (+-[stepsPerPhase]
+     * steps from wherever the AI already was) and gave up without moving
+     * at all whenever none of those beat staying put - so a target that
+     * moved somewhere requiring a big multi-turn journey around the
+     * planet left the AI stuck exactly where it was, turn after turn
+     * (Boo, on-device: it "stayed in same position and made the same
+     * shot as before" even after he'd clearly repositioned into a spot
+     * that called for a direct shot from the far side).
+     *
+     * This version instead searches the *entire* planet - all the way
+     * around, same [stepAngleDegrees] resolution as before, ignoring
+     * [stepsPerPhase] entirely for this part - for the single best
+     * PREDICTED SHOT via [bestAimFor], regardless of whether it's
+     * reachable this turn. It then moves [angleDegrees] as far toward
+     * that ideal angle as this turn's budget ([stepsPerPhase] steps)
+     * allows, the short way around. If the ideal spot is in reach, this
+     * lands exactly on it (same end result as before in the easy case).
+     * If it isn't, this is still real progress - not a stall - and the
+     * very next call (next turn) re-runs the same full search from the
+     * new position and keeps closing the gap. A target requiring a big
+     * swing around the planet now takes visible multiple turns to reach,
+     * exactly like the equivalent move would cost the player multiple
+     * turns too, instead of the AI simply giving up on it.
      */
     private fun reposition(target: Vector2) {
         val sources = gravitySources()
@@ -190,28 +195,27 @@ class AiTurnController(
         val effectiveAimSpeed = aimSpeed * speedTuning
         val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
 
-        var bestAngle = angleDegrees
-        var bestApproach = Float.MAX_VALUE
-        for (steps in 0..stepsPerPhase) {
-            val offsets = if (steps == 0) listOf(0f) else listOf(steps * stepAngleDegrees, -steps * stepAngleDegrees)
-            for (offset in offsets) {
-                val candidateAngle = angleDegrees + offset
-                val candidateOrigin = positionAt(candidateAngle)
-                val (_, approach) = bestAimFor(
-                    candidateOrigin, candidateAngle * MathUtils.degreesToRadians, target,
-                    sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
-                )
-                if (approach < bestApproach) {
-                    bestApproach = approach
-                    bestAngle = candidateAngle
-                }
-                if (approach <= repositionGoodEnoughApproach) {
-                    angleDegrees = bestAngle
-                    return
-                }
+        var idealAngle = angleDegrees
+        var idealApproach = Float.MAX_VALUE
+        var angle = 0f
+        while (angle < 360f) {
+            val candidateOrigin = positionAt(angle)
+            val (_, approach) = bestAimFor(
+                candidateOrigin, angle * MathUtils.degreesToRadians, target,
+                sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
+            )
+            if (approach < idealApproach) {
+                idealApproach = approach
+                idealAngle = angle
             }
+            angle += stepAngleDegrees
         }
-        angleDegrees = bestAngle
+
+        val maxStepDegrees = stepsPerPhase * stepAngleDegrees
+        var delta = (idealAngle - angleDegrees) % 360f
+        if (delta > 180f) delta -= 360f
+        if (delta < -180f) delta += 360f
+        angleDegrees += delta.coerceIn(-maxStepDegrees, maxStepDegrees)
     }
 
     private fun positionAt(angle: Float): Vector2 {
@@ -224,6 +228,14 @@ class AiTurnController(
         val origin = position
         val velocity = searchAim(origin, targetPosition)
         onFire(origin, velocity)
+        // Post-shot movement, mirroring the player's own pre-shot/post-shot
+        // split (AvatarMovementController.Phase) - one more repositioning
+        // pass toward the same ideal firing angle, using the turn's
+        // movement budget a second time, before the turn actually ends.
+        // Not a distinct "take cover" heuristic (nothing scores defensive
+        // position yet) - just a second chance to close the gap toward
+        // [reposition]'s target, same goal as the pre-shot move.
+        reposition(targetPosition)
         active = false
         onTurnComplete()
     }

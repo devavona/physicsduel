@@ -2043,6 +2043,96 @@ otherwise (e.g. a visible stutter right as the AI's turn starts).
    line, if you want to distinguish "the search chose a bad shot" from
    "the error jitter threw off a good one" while tuning.
 
+## Phase 19e: AI full-planet repositioning + extra movement budget
+
+Boo's on-device follow-up to Phase 19d: after the AI repositioned for a
+gravity-assisted shot, he then moved into a spot that called for an easy
+direct shot instead - but the AI "stayed in same position and made the
+same shot as before." Root cause, confirmed from the screenshot he sent
+(the AI's dot was sitting on the far side of its own planet, ~180 degrees
+from the near side that would face him): `reposition()` only ever looked
+at positions reachable *that turn* (+-75 degrees, the same per-phase
+movement budget the player has) and simply gave up without moving at all
+whenever nothing reachable beat staying put. A target requiring a big
+swing around the planet left the AI stuck in place indefinitely instead
+of visibly working its way there over several turns.
+
+**Fix: `reposition()` now searches the entire planet.** All the way
+around (same 15-degree resolution as before, 24 positions total) for the
+single best predicted shot via `bestAimFor`, regardless of whether it's
+reachable this turn - then moves `angleDegrees` as far toward that ideal
+angle as the current movement budget allows, the short way around. If the
+ideal spot is in reach, this lands exactly on it (same behavior as
+before in the easy case). If it isn't, this is real progress rather than
+a stall, and the next call re-runs the same full search from the new
+position and keeps closing the gap turn by turn - Boo's explicit ask:
+"if the ai thinks it needs 2 or 3 turns to get into a firing position,
+that is ok. it should start to move in the right direction." The old
+`repositionGoodEnoughApproach` early-exit field is gone - no longer
+needed once the search always finds the true best angle up front instead
+of bailing out of a bounded scan early.
+
+**Confirmed already covered, no change needed:** the "does it try
+slingshotting around the planet or the star to hit the player" half of
+Boo's ask was already true before this phase - `gravitySources()` always
+returns every gravity body in the scene (both planets and the star), and
+that full list already feeds `bestAimFor`'s simulation every turn, so the
+AI was already trying every gravity-curved path available to it,
+regardless of position. Nothing to build there.
+
+**Extra AI movement budget.** Boo, explicit: give the AI 2 more steps
+per turn than the player gets - 1 more before the shot, 1 more after.
+Player's own two phases (pre-shot/post-shot) are already equal (5 steps
+each), so a single `AI_MOVEMENT_STEPS_PER_PHASE = MOVEMENT_STEPS_PER_PHASE
++ 1` constant (6) naturally gives the AI +1 in both, and is now what's
+wired into `AiTurnController`'s `stepsPerPhase` instead of the player's
+own constant.
+
+**New: the AI now has a post-shot movement phase too.** Previously the
+AI's turn ended the instant it fired - no equivalent to the player's own
+post-shot repositioning (`AvatarMovementController.Phase.POST_SHOT`).
+`fire()` now calls `reposition(targetPosition)` a second time, right
+after firing and before ending the turn, using the same enlarged budget.
+Explicit scope note: this second move chases the *same* goal as the
+pre-shot move (closing more distance toward its own best offensive
+angle) - it is not a distinct "dodge the player's likely counter-shot"
+heuristic, since nothing scores defensive positioning yet. Net effect:
+the AI can now close up to 12 steps' worth of angular distance per full
+turn (6 pre-shot + 6 post-shot) versus the player's 10 (5 + 5), reaching
+a good firing position over noticeably fewer turns, while still firing a
+real shot every single turn along the way.
+
+**Performance note (updated from Phase 19d's).** The full-planet sweep
+is 24 simulated candidate positions every reposition() call (up from up
+to 11 before, since the old early-exit could stop sooner) - roughly
+double the simulation work of Phase 19d's version, and now `reposition()`
+runs twice per AI turn (pre-shot and post-shot) instead of once. Still
+judged trivial: each candidate's own internal aim sweep is the same fixed
+cost as before, this only multiplies a "cheap point-mass simulation, no
+real physics bodies" workload that was already deemed negligible, and
+it's all hidden behind the existing "AI thinking" pause. Flagging in case
+on-device testing says otherwise.
+
+### How to test Phase 19e on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Reposition into a spot that clearly calls for the AI to make a large
+   move (e.g., put a planet directly between you and it) and confirm the
+   AI now visibly starts moving toward a better spot turn after turn,
+   instead of staying put indefinitely.
+3. Confirm it still fires a real shot every turn while it's still
+   mid-journey to its ideal spot, not just once it finally arrives.
+4. Once it's close enough to reach its ideal spot in one turn, confirm it
+   lands exactly there (not overshooting or oscillating past it).
+5. Compare how far the AI seems to reposition per turn versus your own
+   move budget - it should now visibly cover more ground than you can in
+   the same turn (2 extra steps total, split before/after its shot).
+6. Watch the post-fire moment specifically - the AI should now make one
+   more visible repositioning move right after its missile launches,
+   before handing control back to you.
+7. Same as Phase 19d: watch for any new stutter around the AI's turn,
+   given the doubled simulation cost noted above.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

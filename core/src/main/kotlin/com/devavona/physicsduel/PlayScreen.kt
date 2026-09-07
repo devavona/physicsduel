@@ -257,6 +257,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val MOVEMENT_STEPS_PER_PHASE = 5
         private const val MOVEMENT_STEP_ANGLE_DEGREES = 15f
 
+        // Boo, explicit: give the AI 2 more steps per turn than the player
+        // gets, split 1-and-1 across its pre-shot and post-shot movement
+        // (see AiTurnController.fire()'s post-shot reposition() call) -
+        // since the player's own two phases are already equal (5 and 5),
+        // a single +1'd constant naturally gives the AI +1 in both.
+        private const val AI_MOVEMENT_STEPS_PER_PHASE = MOVEMENT_STEPS_PER_PHASE + 1
+
         // Standard math convention (0 degrees = +X/east, 90 = +Y/north) -
         // 90 starts the avatar at the top of the launch planet, roughly
         // facing the target planet to its right.
@@ -511,7 +518,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             planetCenter = Vector2(TARGET_PLANET_X, PLANETS_Y),
             planetRadius = PLANET_RADIUS,
             heightAboveSurface = LAUNCH_POINT_CLEARANCE,
-            stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
+            stepsPerPhase = AI_MOVEMENT_STEPS_PER_PHASE,
             stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
             startAngleDegrees = AI_START_ANGLE_DEGREES,
             aimSpeed = AI_AIM_SPEED,
