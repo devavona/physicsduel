@@ -65,7 +65,19 @@ class AiTurnController(
     private val gravitationalConstant: Float,
     private val gravityMinDistance: Float,
     private val gravityMultiplier: () -> Float,
+    // (trajectorySimulator, below, is built from gravitationalConstant/
+    // gravityMinDistance right after the primary constructor - Phase 16
+    // shares it with PlayScreen's aim preview instead of duplicating the
+    // stepping math in both places.)
     private val gravitySources: () -> List<Pair<Vector2, Float>>,
+    // Phase 17 - ShotSpeedTuning's live, on-device-tunable dial, read once
+    // per aim search (same timing as gravityMultiplier/gravitySources
+    // above - see searchAim). Scales both aimSpeed itself and, inversely,
+    // how long a candidate is allowed to simulate for - a slower shot
+    // takes longer to reach anywhere, so the simulation window needs to
+    // stretch to match, or a slowed-down shot would look like it "can't
+    // reach" the target when it just needed more simulated time.
+    private val shotSpeedMultiplier: () -> Float,
     // origin: wherever `position` ended up after this turn's reposition -
     // the AI's own current position is the single source of truth for both
     // "where its body is drawn" and "where its shot spawns from", same
@@ -73,6 +85,8 @@ class AiTurnController(
     private val onFire: (origin: Vector2, velocity: Vector2) -> Unit,
     private val onTurnComplete: () -> Unit
 ) {
+
+    private val trajectorySimulator = TrajectorySimulator(gravitationalConstant, gravityMinDistance)
 
     /** One circular obstacle a straight-line shot can be blocked by - see [obstructionSeverity]. Fixed geometry (a planet/star's center+radius), not a live Box2D reference. */
     data class Obstacle(val center: Vector2, val radius: Float)
@@ -237,10 +251,17 @@ class AiTurnController(
     private fun searchAim(origin: Vector2, target: Vector2): Vector2 {
         val sources = gravitySources()
         val multiplier = gravityMultiplier()
+        val speedTuning = shotSpeedMultiplier()
+        val effectiveAimSpeed = aimSpeed * speedTuning
+        // Inverse of speedTuning - a slower shot takes proportionally
+        // longer to travel the same distance, so it needs proportionally
+        // more simulated time to be judged fairly (see the constructor's
+        // shotSpeedMultiplier doc comment).
+        val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
 
         val baseAngleRadians = angleDegrees * MathUtils.degreesToRadians
-        var bestVelocity = Vector2(target).sub(origin).nor().scl(aimSpeed)
-        var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier)
+        var bestVelocity = Vector2(target).sub(origin).nor().scl(effectiveAimSpeed)
+        var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
 
         val stepCount = (2 * aimSearch.angleSearchDegrees / aimSearch.angleStepDegrees).toInt()
         for (step in 0..stepCount) {
@@ -248,8 +269,8 @@ class AiTurnController(
             val angleRadians = baseAngleRadians + angleOffsetDegrees * MathUtils.degreesToRadians
             val direction = Vector2(MathUtils.cos(angleRadians), MathUtils.sin(angleRadians))
             for (speedMultiplier in aimSearch.speedMultipliers) {
-                val candidateVelocity = Vector2(direction).scl(aimSpeed * speedMultiplier)
-                val approach = simulateClosestApproach(origin, candidateVelocity, target, sources, multiplier)
+                val candidateVelocity = Vector2(direction).scl(effectiveAimSpeed * speedMultiplier)
+                val approach = simulateClosestApproach(origin, candidateVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
                 if (approach < bestApproach) {
                     bestApproach = approach
                     bestVelocity = candidateVelocity
@@ -296,22 +317,15 @@ class AiTurnController(
         velocity: Vector2,
         target: Vector2,
         sources: List<Pair<Vector2, Float>>,
-        multiplier: Float
+        multiplier: Float,
+        simMaxSeconds: Float
     ): Float {
         val position = Vector2(origin)
         val currentVelocity = Vector2(velocity)
         var closest = position.dst(target)
         var elapsed = 0f
-        while (elapsed < aimSearch.simMaxSeconds) {
-            val acceleration = Vector2()
-            for ((sourcePosition, sourceMass) in sources) {
-                val direction = Vector2(sourcePosition).sub(position)
-                val distance = maxOf(direction.len(), gravityMinDistance)
-                direction.nor()
-                acceleration.add(direction.scl(gravitationalConstant * sourceMass / (distance * distance) * multiplier))
-            }
-            currentVelocity.add(acceleration.scl(aimSearch.simStepSeconds))
-            position.add(Vector2(currentVelocity).scl(aimSearch.simStepSeconds))
+        while (elapsed < simMaxSeconds) {
+            trajectorySimulator.step(position, currentVelocity, aimSearch.simStepSeconds, sources, multiplier)
             elapsed += aimSearch.simStepSeconds
 
             val distanceToTarget = position.dst(target)

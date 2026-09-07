@@ -1437,6 +1437,140 @@ always computing one straight-line velocity.
    `AI_AIM_SPEED_MULTIPLIERS`, and `AI_TRAJECTORY_SIM_MAX_SECONDS` (all in
    `PlayScreen`) are easy to retune.
 
+## Phase 16: aim trajectory preview
+
+**Status: ✅ DONE - confirmed on-device.** Boo's first "visual
+overlays" request - picked from a few options (health bars, hit/damage
+feedback, aim preview) as the starting point, since it directly reuses the
+gravity-simulation work Phase 15 just built for the AI's aim search rather
+than starting a new mechanic from scratch.
+
+- **`TrajectorySimulator`** (new file) - the point-mass gravity integrator
+  that used to live only inside `AiTurnController`'s aim search, pulled out
+  into its own small shared class so both the AI's aim search and this new
+  player-facing preview run the exact same stepping math instead of two
+  copies that could quietly drift apart over time. `AiTurnController` was
+  refactored to use it too (no behavior change there - same math, just no
+  longer duplicated).
+- **`PlayScreen.renderAimTrajectoryPreview()`** (new) - while the player is
+  actively pulling back to aim, predicts the shot's actual gravity-curved
+  path *before* release (using the exact velocity formula
+  `SlingshotInputProcessor.touchUp` would fire, computed here since that
+  formula only actually runs on release) and draws it as a dotted line -
+  small dots, not a solid line, so it's never visually confused with
+  `renderProjectileTrails`'s solid trail (Phase 15) left behind by a real
+  in-flight missile. "Dots" = a projection; "solid line" = this already
+  happened.
+- **Stops early at an obstacle.** The preview shares `celestialObstacles`
+  (now a `PlayScreen` field, factored out of what used to be inline in
+  `aiTurnController`'s own constructor call) with the AI's aim search, so
+  if the predicted path would hit the star or a planet, the dots stop
+  right there instead of continuing through it - the preview shows exactly
+  as far as the real shot could actually fly.
+- Only shown during `Phase.PRE_SHOT` (gated on
+  `avatarMovementController.canFire`, same gate the actual fire button
+  uses) - no preview during post-shot repositioning, when firing isn't
+  possible anyway.
+- **Deliberately not exact.** It's a prediction using the gravity sources'
+  state *at the moment you're dragging*, extrapolated up to
+  `AIM_PREVIEW_MAX_SECONDS` (3s) - if a celestial body's mass changes (a
+  planet takes damage) between when you start dragging and when you
+  release, or if the AI's projectile briefly makes a source's live state
+  weird mid-simulation (it doesn't - this only reads static positions
+  each frame, so this is a non-issue in practice, just noting the general
+  shape of the guarantee), the preview reflects gravity as it was at prediction
+  time, same caveat every "aim assist" in a physics game has.
+
+### How to test Phase 16 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Start pulling back to aim (touch down near the launch marker and drag).
+   A dotted gray line should appear, curving out from the launch point -
+   confirm it updates live as you keep dragging (different pull
+   direction/distance should visibly reshape the dotted arc).
+3. Release the shot and compare: the real missile's solid orange trail
+   (Phase 15) should closely follow wherever the dotted preview predicted,
+   confirming the preview is actually accurate and not just a vague
+   guess.
+4. Try a pull strong/angled enough that the predicted path would fly
+   through a planet or the star - confirm the dots stop right at that
+   obstacle instead of continuing through or past it.
+5. Confirm no preview is drawn during your post-shot repositioning phase
+   (after you've already fired this turn) even if you touch near the
+   launch marker - firing (and so previewing) shouldn't be possible then.
+6. If the dotted line is hard to see against the background, too
+   short/long to be useful, or the dot spacing looks off, tell me what
+   you saw - `AIM_PREVIEW_MAX_SECONDS`, `AIM_PREVIEW_DOT_INTERVAL_STEPS`,
+   and `AIM_PREVIEW_DOT_RADIUS` (all in `PlayScreen`) are easy to retune.
+
+## Phase 17: live-tunable shot speed
+
+**Status: ✅ DONE - confirmed on-device.** Boo dialed the Shot Speed
+control down to 0.4x and confirmed it felt right - now the new default
+(see below). Boo's own diagnosis after Phase 16: shots feel "very
+mathmatical and precise... too fast" - gravity's
+pull builds up over *time in flight*, so a shot that crosses the whole
+scene in a fraction of a second barely gives gravity (or the player) time
+to do anything visible, however accurate the physics is. Two directions
+were on the table (retune the fixed numbers directly, or add a live
+on-device dial the way gravity already has one) - Boo picked the live
+dial, the same fix `GravityDebugController` already proved out for "how
+strong should gravity feel."
+
+- **`ShotSpeedTuning`** (new) - a tiny holder for one live `multiplier`
+  value, the shot-speed equivalent of `GravitySystem.gravityMultiplier`.
+  Starts at `DEFAULT_MULTIPLIER` - originally 0.5 as a first-guess
+  starting point, retuned to **0.4** once Boo dialed it in on-device and
+  confirmed it felt right (see the on-device test section below).
+- **`ShotSpeedDebugController`** (new) - two +/- tap zones, structurally
+  identical to `GravityDebugController`, stacked directly below its button
+  row (same right-edge corner) so both live-tuning tools sit together.
+  Wired into both `fullInputProcessor` and `restrictedInputProcessor` (a
+  standing tool, available regardless of whose turn it is, same as gravity
+  tuning).
+- **Applied everywhere a shot's speed is computed:** `SlingshotInputProcessor`
+  (the player's actual fired shot), `AiTurnController` (the AI's aim
+  search - `effectiveAimSpeed = aimSpeed * shotSpeedMultiplier()`), and
+  `PlayScreen.renderAimTrajectoryPreview` (Phase 16's dotted preview, so it
+  stays accurate to whatever speed is currently dialed in). All three read
+  the live value fresh at the moment they need it - adjusting mid-game
+  takes effect on the very next shot, no rebuild.
+- **The AI's aim-search time window and the aim preview's simulated time
+  window both scale inversely with the multiplier** (`effectiveSimMaxSeconds
+  = baseSimMaxSeconds / shotSpeedMultiplier`) - a slower shot takes
+  proportionally longer to travel the same distance, so without this, a
+  slowed-down shot would look like it "can't reach" the target (AI aim
+  search) or the preview's dots would just stop mid-flight, well short of
+  where the shot actually ends up.
+
+### How to test Phase 17 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Below the existing "Gravity xN.N" controls (top-right), a new row:
+   "Shot Speed xN.N" starting at "x0.5", with its own +/- buttons.
+3. Fire a shot at the default 0.5x - it should already feel noticeably
+   slower/weightier than before Phase 17, with more visible hang-time and
+   a more obvious curve (see the class doc comments for why slower also
+   means "curves more," not just "takes longer").
+4. Tap the Shot Speed +/- buttons and fire a few more shots at different
+   multipliers - confirm the change takes effect immediately (no
+   restart/rebuild needed) and the aim preview's dotted line (Phase 16)
+   still accurately predicts where the shot ends up at whatever multiplier
+   is currently set.
+5. Let the AI take a turn or two at a low multiplier (e.g. 0.2x) -
+   confirm its shot still travels the full distance toward you (not
+   cutting off early/looking like it gave up partway) and its aim search
+   still finds reasonable shots, not just noticeably worse ones because it
+   ran out of simulated time.
+6. Find whatever multiplier actually feels right and tell me the number -
+   `ShotSpeedTuning.DEFAULT_MULTIPLIER` is a one-line change to make that
+   the new starting point instead of leaving it something you have to
+   redial in every fresh run.
+
+**Confirmed on-device: 0.4x is the new default.** `ShotSpeedTuning
+.DEFAULT_MULTIPLIER` updated from 0.5 to 0.4 - a fresh run now starts
+already at the speed Boo confirmed felt right, no redialing needed.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

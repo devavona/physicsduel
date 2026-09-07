@@ -186,6 +186,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // most shots without needing to also track elapsed time.
         private const val TRAIL_MAX_POINTS = 90
 
+        // Phase 16 - aim trajectory preview, drawn while the player is
+        // pulling back to shoot (see renderAimTrajectoryPreview). Reuses
+        // TrajectorySimulator, the same predictor AiTurnController's aim
+        // search uses. simStepSeconds matches PhysicsSystem's own tick;
+        // dotIntervalSteps only draws every 4th simulated point (a dotted
+        // line, not a solid one - visually distinct from the solid orange
+        // flight trail an actual in-flight missile leaves, so "this is a
+        // projection" never looks like "this already happened").
+        private const val AIM_PREVIEW_MAX_SECONDS = 3f
+        private const val AIM_PREVIEW_STEP_SECONDS = 1f / 60f
+        private const val AIM_PREVIEW_DOT_INTERVAL_STEPS = 4
+        private const val AIM_PREVIEW_DOT_RADIUS = 0.05f
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -258,6 +271,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var slingshotInputProcessor: SlingshotInputProcessor
     private lateinit var avatarMovementController: AvatarMovementController
     private lateinit var aiTurnController: AiTurnController
+    // Phase 16 - shared between aiTurnController's obstacle list and the
+    // player's own aim preview (see renderAimTrajectoryPreview), so both
+    // read the same geometry instead of two copies that could drift.
+    private lateinit var celestialObstacles: List<AiTurnController.Obstacle>
+    private lateinit var trajectorySimulator: TrajectorySimulator
 
     // Phase 13 - the avatar's own physics body. Kinematic, not dynamic:
     // the avatar moves under AvatarMovementController's direct control
@@ -291,6 +309,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var launchPoint: Vector2
     private lateinit var gravitySystem: GravitySystem
     private lateinit var gravityDebugController: GravityDebugController
+    // Phase 17 - shotSpeedTuning is the live-adjustable value itself
+    // (read by SlingshotInputProcessor, aiTurnController, and the aim
+    // preview below); shotSpeedDebugController is the on-screen +/- tool
+    // that adjusts it, same split GravitySystem/GravityDebugController use.
+    private lateinit var shotSpeedTuning: ShotSpeedTuning
+    private lateinit var shotSpeedDebugController: ShotSpeedDebugController
 
     // Phase 7 HUD: a screen-pixel (not world-unit) camera + batch, separate
     // from [camera]/[viewport] above which stay in Box2D world units for the
@@ -365,10 +389,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // Phase 14 - built here (before the target character body) since
         // createTarget() below now seeds the body's position from
         // aiTurnController.position instead of a separately-hardcoded
-        // formula. obstacles are fixed geometry (center + radius), not
-        // live Box2D references - see AiTurnController.Obstacle's doc
-        // comment; a destroyed target planet (Phase 11) still counts as an
-        // obstacle here, a known minor gap, not addressed this phase.
+        // formula. Shared with PlayScreen's own Phase 16 aim preview (see
+        // celestialObstacles) - fixed geometry (center + radius), not live
+        // Box2D references - see AiTurnController.Obstacle's doc comment;
+        // a destroyed target planet (Phase 11) still counts as an obstacle
+        // here, a known minor gap, not addressed this phase.
+        celestialObstacles = listOf(
+            AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
+            AiTurnController.Obstacle(Vector2(LAUNCH_PLANET_X, PLANETS_Y), PLANET_RADIUS),
+            AiTurnController.Obstacle(Vector2(TARGET_PLANET_X, PLANETS_Y), PLANET_RADIUS)
+        )
+        trajectorySimulator = TrajectorySimulator(GravitySystem.G, GravitySystem.MIN_DISTANCE)
+
         aiTurnController = AiTurnController(
             planetCenter = Vector2(TARGET_PLANET_X, PLANETS_Y),
             planetRadius = PLANET_RADIUS,
@@ -378,11 +410,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             startAngleDegrees = AI_START_ANGLE_DEGREES,
             aimSpeed = AI_AIM_SPEED,
             thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
-            obstacles = listOf(
-                AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
-                AiTurnController.Obstacle(Vector2(LAUNCH_PLANET_X, PLANETS_Y), PLANET_RADIUS),
-                AiTurnController.Obstacle(Vector2(TARGET_PLANET_X, PLANETS_Y), PLANET_RADIUS)
-            ),
+            obstacles = celestialObstacles,
             aimSearch = AiTurnController.AimSearchConfig(
                 angleSearchDegrees = AI_AIM_ANGLE_SEARCH_DEGREES,
                 angleStepDegrees = AI_AIM_ANGLE_STEP_DEGREES,
@@ -394,6 +422,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             gravityMinDistance = GravitySystem.MIN_DISTANCE,
             gravityMultiplier = { gravitySystem.gravityMultiplier },
             gravitySources = { gravitySystem.currentSources() },
+            shotSpeedMultiplier = { shotSpeedTuning.multiplier },
             onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
             onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
         )
@@ -426,11 +455,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         engine.addEntity(avatarEntity)
 
+        shotSpeedTuning = ShotSpeedTuning()
+
         slingshotInputProcessor = SlingshotInputProcessor(
             launchPoint = launchPoint,
             viewport = viewport,
             powerScale = PULL_POWER_SCALE,
             maxSpeed = MAX_MISSILE_SPEED,
+            speedMultiplier = { shotSpeedTuning.multiplier },
             onFire = { velocity ->
                 if (avatarMovementController.canFire) {
                     fireMissile(launchPoint, velocity, excludeCategory = CATEGORY_PLAYER_AVATAR)
@@ -439,23 +471,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             }
         )
         gravityDebugController = GravityDebugController(gravitySystem)
+        shotSpeedDebugController = ShotSpeedDebugController(shotSpeedTuning)
     }
 
     override fun show() {
         fullInputProcessor = InputMultiplexer().apply {
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
+            addProcessor(shotSpeedDebugController)
             addProcessor(avatarMovementController)
             addProcessor(slingshotInputProcessor)
         }
         // Deliberately still includes BackKeyHandler (pausing should always
-        // work) and gravityDebugController (a standing debug tool, not
-        // something turn structure should ever lock out) - only the
-        // player's own movement/aiming input is left out during the AI's
-        // turn.
+        // work) and gravityDebugController/shotSpeedDebugController (both
+        // standing debug tools, not something turn structure should ever
+        // lock out) - only the player's own movement/aiming input is left
+        // out during the AI's turn.
         restrictedInputProcessor = InputMultiplexer().apply {
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
+            addProcessor(shotSpeedDebugController)
         }
         Gdx.input.inputProcessor = fullInputProcessor
         Gdx.input.setCatchKey(Input.Keys.BACK, true) // otherwise Android treats Back as "quit app"
@@ -660,6 +695,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         camera.update()
         debugRenderer.render(world, camera.combined)
         renderDebugOverlay()
+        renderAimTrajectoryPreview()
         renderProjectileTrails()
 
         // Bug found on-device (Fold 8, unfolded/landscape-wide screen):
@@ -678,6 +714,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
         renderHud()
         renderGravityDebugControls()
+        renderShotSpeedDebugControls()
         renderMovementControls()
         renderTargetHud()
         renderTargetPlanetHud()
@@ -702,6 +739,64 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             shapeRenderer.color = Color.YELLOW
             val dragPoint = Vector2(launchPoint).add(pull)
             shapeRenderer.line(launchPoint, dragPoint)
+        }
+        shapeRenderer.end()
+    }
+
+    /**
+     * Phase 16 - while the player is actively pulling back to aim (see
+     * [SlingshotInputProcessor.currentAimLine]), predicts and draws the
+     * shot's actual gravity-curved path *before* release, using the exact
+     * same [TrajectorySimulator] [aiTurnController]'s own aim search uses
+     * and the exact velocity formula [SlingshotInputProcessor.touchUp]
+     * would fire (duplicated here deliberately - `onFire` only runs once
+     * released, so there's no live velocity to read mid-drag). Drawn as
+     * dots, not a solid line, so it never looks like [renderProjectileTrails]'s
+     * "this already happened" trail - this is only a projection, and stops
+     * early (per [celestialObstacles]) if the predicted path would hit a
+     * planet or the star before the preview window runs out.
+     */
+    private fun renderAimTrajectoryPreview() {
+        val pull = slingshotInputProcessor.currentAimLine ?: return
+        if (!avatarMovementController.canFire) return
+        if (pull.isZero(0.01f)) return
+
+        val speedTuning = shotSpeedTuning.multiplier
+        val speed = minOf(pull.len() * PULL_POWER_SCALE, MAX_MISSILE_SPEED) * speedTuning
+        val velocity = Vector2(pull).nor().scl(-speed) // opposite the drag direction - see SlingshotInputProcessor.touchUp
+
+        val sources = gravitySystem.currentSources()
+        val multiplier = gravitySystem.gravityMultiplier
+        val position = Vector2(launchPoint)
+        val currentVelocity = Vector2(velocity)
+        // Inverse of speedTuning - see AiTurnController.searchAim's
+        // effectiveSimMaxSeconds for the same reasoning, applied here to
+        // the preview instead of the AI's aim search.
+        val effectiveMaxSeconds = AIM_PREVIEW_MAX_SECONDS / speedTuning
+
+        shapeRenderer.projectionMatrix = camera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        shapeRenderer.color = Color.LIGHT_GRAY
+
+        var elapsed = 0f
+        var stepIndex = 0
+        while (elapsed < effectiveMaxSeconds) {
+            trajectorySimulator.step(position, currentVelocity, AIM_PREVIEW_STEP_SECONDS, sources, multiplier)
+            elapsed += AIM_PREVIEW_STEP_SECONDS
+            stepIndex++
+
+            var blocked = false
+            for (obstacle in celestialObstacles) {
+                if (position.dst(obstacle.center) <= obstacle.radius) {
+                    blocked = true
+                    break
+                }
+            }
+            if (blocked) break
+
+            if (stepIndex % AIM_PREVIEW_DOT_INTERVAL_STEPS == 0) {
+                shapeRenderer.circle(position.x, position.y, AIM_PREVIEW_DOT_RADIUS, 8)
+            }
         }
         shapeRenderer.end()
     }
@@ -782,6 +877,47 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             hudBatch, multiplierLabel,
             plusRect.x + plusRect.width - HudFont.widthOf(multiplierLabel),
             gravityDebugController.labelBaselineY
+        )
+        hudBatch.end()
+    }
+
+    /**
+     * Phase 17 - draws [ShotSpeedDebugController]'s two tap zones and the
+     * current multiplier value, directly below [renderGravityDebugControls]'s
+     * row (same right-edge alignment). Debug-only tuning UI, identical
+     * structure to that method - see [ShotSpeedDebugController]'s doc
+     * comment for why this exists.
+     */
+    private fun renderShotSpeedDebugControls() {
+        val minusRect = shotSpeedDebugController.minusButtonRect
+        val plusRect = shotSpeedDebugController.plusButtonRect
+
+        shapeRenderer.projectionMatrix = hudCamera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        shapeRenderer.color = Color(0.25f, 0.25f, 0.32f, 1f)
+        shapeRenderer.rect(minusRect.x, minusRect.y, minusRect.width, minusRect.height)
+        shapeRenderer.rect(plusRect.x, plusRect.y, plusRect.width, plusRect.height)
+        shapeRenderer.end()
+
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        val minusLabel = "-"
+        HudFont.font.draw(
+            hudBatch, minusLabel,
+            minusRect.x + (minusRect.width - HudFont.widthOf(minusLabel)) / 2f,
+            minusRect.y + minusRect.height * 0.65f
+        )
+        val plusLabel = "+"
+        HudFont.font.draw(
+            hudBatch, plusLabel,
+            plusRect.x + (plusRect.width - HudFont.widthOf(plusLabel)) / 2f,
+            plusRect.y + plusRect.height * 0.65f
+        )
+        val multiplierLabel = "Shot Speed x%.1f".format(shotSpeedTuning.multiplier)
+        HudFont.font.draw(
+            hudBatch, multiplierLabel,
+            plusRect.x + plusRect.width - HudFont.widthOf(multiplierLabel),
+            shotSpeedDebugController.labelBaselineY
         )
         hudBatch.end()
     }

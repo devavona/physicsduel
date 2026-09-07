@@ -13,16 +13,21 @@ import com.badlogic.gdx.utils.viewport.Viewport
  *
  * The fired velocity points opposite the drag - pull down-and-left, the shot
  * goes up-and-right - and its magnitude is the pull distance scaled by
- * [powerScale], clamped to [maxSpeed] so a wild drag can't fire an
- * unreasonably fast shot. [currentAimLine] exposes the live pull vector
- * (null when not aiming) purely for [PlayScreen] to draw a debug aiming
- * line - this class has no rendering code of its own.
+ * [powerScale], clamped to [maxSpeed], then scaled once more by
+ * [speedMultiplier] (Phase 17 - [ShotSpeedTuning]'s live, on-device-tunable
+ * dial on top of the fixed pull-power math, read fresh at the moment of
+ * release so an adjustment mid-drag takes effect on the very shot about to
+ * fire) so a wild drag can't fire an unreasonably fast shot. [currentAimLine]
+ * exposes the live pull vector (null when not aiming) purely for
+ * [PlayScreen] to draw a debug aiming line - this class has no rendering
+ * code of its own.
  */
 class SlingshotInputProcessor(
     private val launchPoint: Vector2,
     private val viewport: Viewport,
     private val powerScale: Float,
     private val maxSpeed: Float,
+    private val speedMultiplier: () -> Float,
     private val onFire: (velocity: Vector2) -> Unit
 ) : InputAdapter() {
 
@@ -64,7 +69,7 @@ class SlingshotInputProcessor(
 
         if (pull.isZero(0.01f)) return true // treat a near-zero drag as "cancelled," not a limp shot
 
-        val speed = minOf(pull.len() * powerScale, maxSpeed)
+        val speed = minOf(pull.len() * powerScale, maxSpeed) * speedMultiplier()
         val velocity = pull.nor().scl(-speed) // opposite the drag direction
         onFire(velocity)
         return true
