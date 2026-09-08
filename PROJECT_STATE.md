@@ -2325,6 +2325,60 @@ future session picks it up:
   - `ProjectileContactListener` currently only ever damages whatever the
   missile directly touches.
 
+## Phase 21: planet damage visuals (craters/scorch overlay)
+
+Resolves the "Damage visual, decided" note above - craters/scorch marks
+overlaid as the target planet takes hits, with true shrink-as-mass-drops
+deliberately deferred as a later follow-up (Boo's original answer:
+"Both - craters now, shrinking later").
+
+**How it works.** `damage_overlay.png` (procedurally generated, same
+Python/numpy/Pillow approach as every other texture this project - no
+network access for external assets, see the earlier art-generation
+phases) is a single 256x256 transparent PNG: a fixed scatter of six
+crater blotches (dark scorched fill, warm rim highlight near each
+crater's edge) positioned across the disc. It's drawn on top of
+`planetTargetTexture` every frame in `renderCelestialSprites`, with its
+alpha scaled to `1 - (mass / initialMass)` read straight off the target
+planet's `GravitySourceComponent` - 0 when pristine (invisible), 1 once
+fully destroyed (fully visible). Since there are only 4 hit-steps to
+destruction (`CELESTIAL_MASS_DAMAGE` 0.5 out of `TARGET_PLANET_MASS` 2),
+that's a clean 25/50/75/100% progression - each hit measurably darkens
+the same fixed crater pattern rather than revealing new geometry per hit.
+
+**Deliberately not per-impact-location.** The game doesn't track where
+on the planet a missile actually landed, only the aggregate mass lost -
+so this is "the planet looks more scarred overall" rather than "a crater
+appears exactly where you hit it." A true per-impact decal system would
+need to record hit positions/angles on the sphere, which is a bigger
+feature than this phase's scope.
+
+**Only the target planet, deliberately.** The launch planet still has no
+`GravitySourceComponent` at all (unchanged since Phase 8/11 - see that
+scope note) and can't currently take damage, so it gets no overlay. Once
+the launch planet is ever made damageable (a natural fit for wiring up
+the player's own planet symmetrically), the same overlay/alpha approach
+extends to it directly - no new mechanism needed, just a second draw call.
+
+**Untouched by this phase, deliberately:** the planet's actual rendered
+size, its Box2D fixture radius, and `PLANET_RADIUS` itself - true
+shrinking is the explicitly-deferred follow-up mentioned above, not
+something this phase touches.
+
+### How to test Phase 21 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Land a hit on the target planet and confirm a faint crater pattern
+   becomes visible - shouldn't be there at all before the first hit.
+3. Land a second, third, and fourth hit and confirm the craters get
+   progressively more visible/darker each time, most pronounced right as
+   the planet is destroyed.
+4. Confirm the launch planet (yours) never shows any overlay - expected,
+   not a bug, per the "only the target planet" note above.
+5. If the craters read as too subtle or too harsh at any damage stage,
+   tell me roughly what you saw - `damage_overlay.png`'s crater
+   strengths are a quick regenerate, not a code change.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

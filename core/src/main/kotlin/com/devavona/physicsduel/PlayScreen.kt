@@ -427,6 +427,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val planetTargetTexture = Texture(Gdx.files.internal("textures/planet_target.png")).apply {
         setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
     }
+    // Phase 21 - a single crater/scorch overlay for the target planet,
+    // drawn on top of planetTargetTexture with alpha scaled to how
+    // damaged it currently is (see renderCelestialSprites) - a fixed
+    // scatter of blotches that fades in as mass is lost, not a per-hit
+    // decal at the actual impact point (the game doesn't track individual
+    // impact positions, only aggregate mass lost). True shrink-as-mass-
+    // drops is a deliberate later follow-up, not this phase - see
+    // PROJECT_STATE.md's Phase 21 entry.
+    private val damageOverlayTexture = Texture(Gdx.files.internal("textures/damage_overlay.png")).apply {
+        setFilter(Texture.TextureFilter.Linear, Texture.TextureFilter.Linear)
+    }
     // Phase 19 - shaded sphere art for the player avatar (blue) and AI
     // target (red), drawn at their live positions each frame (unlike the
     // Phase 18 star/planets, these move) - see renderCharacterSprites.
@@ -1003,6 +1014,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val planetDiameter = PLANET_RADIUS * 2f
         worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
         worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+
+        // Phase 21 - fade the damage overlay in as the target planet loses
+        // mass (0 = pristine/invisible, 1 = fully destroyed/fully visible).
+        // Reads straight from the same GravitySourceComponent the stats
+        // panel already uses, via the same "entity may have been removed
+        // from the engine but its component data is still readable" trick
+        // renderStatsPanel relies on - see targetPlanetEntity's own doc
+        // comment for why that's safe.
+        val targetSource = gravitySourceMapper.get(targetPlanetEntity)
+        if (targetSource != null) {
+            val damageRatio = (1f - targetSource.mass / targetSource.initialMass).coerceIn(0f, 1f)
+            if (damageRatio > 0f) {
+                worldBatch.setColor(1f, 1f, 1f, damageRatio)
+                worldBatch.draw(damageOverlayTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+                worldBatch.setColor(1f, 1f, 1f, 1f)
+            }
+        }
         worldBatch.end()
     }
 
@@ -1431,6 +1459,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         starTexture.dispose()
         planetLaunchTexture.dispose()
         planetTargetTexture.dispose()
+        damageOverlayTexture.dispose()
         avatarPlayerTexture.dispose()
         avatarAiTexture.dispose()
         missileTexture.dispose()
