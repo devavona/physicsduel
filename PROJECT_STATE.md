@@ -2833,6 +2833,162 @@ near the character doesn't accidentally cancel.
    aim line once the cancel is armed)? Not built - flagging as an easy
    follow-up if it feels too hidden.
 
+## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session, not yet built)
+
+Picked back up from the "escalation ladder" backlog item - the ladder's
+own design (see "Campaign progression ladder" above and Phase 23 below)
+flagged squad composition, turn order, and multi-planet placement as all
+still open. This session resolved turn order, and a cluster of camera
+and physics questions that turn order turned out to depend on, in one
+long discussion. Squad composition/AI-behavior-with-multiple-characters
+and planet/character placement are still open - see the end of this
+section.
+
+**Turn order: whole-squad-then-whole-squad, with player-chosen order
+within it.** Considered three shapes: interleaved individual turns
+(each character, either side, in strict rotation), whole-squad-then-
+whole-squad (one side acts with every one of its characters before
+control passes), and freeform (pick any of your living characters each
+"round," one action per side per round). Boo chose whole-squad-then-
+whole-squad, and explicitly wants to choose the order his own
+characters act in during his squad's turn ("I had not thought about
+selecting the order of characters. that does seem to make the game more
+fully fleshed out so lets do that") - not a fixed sequence. Whether the
+AI picks its own order strategically or just uses a simple fixed rule
+(e.g. planet/creation order) is not decided - flagging as an
+implementation-time call, not something Boo needs to weigh in on unless
+it looks wrong on-device once built.
+
+**Camera: this session's fixed single-screen assumption is going away.**
+Checked the current code: `PlayScreen` uses one `FitViewport` locked to
+constant `WORLD_WIDTH`/`WORLD_HEIGHT`, camera pinned dead-center, never
+moves, no zoom - the whole "everything always fits on one screen"
+tech-demo assumption, still true as of this session. Boo: "I don't want
+[the play field] to always fit on one screen... pinch to zoom and
+ability to scroll around and zoom in and out." Decided:
+- **Gesture split:** pinch-zoom and pan are strictly 2-finger. 1-finger
+  touch stays exactly as it works today - reserved entirely for
+  character movement and slingshot aiming, no conflict/disambiguation
+  logic needed between camera control and existing gestures.
+- **Camera auto-behavior:** camera is NOT a continuous auto-follow (not
+  chasing the active character or the projectile in flight). Instead it
+  snaps to frame the active avatar once, at the moment a new avatar's
+  turn begins. Between that snap and the next one, the player is free
+  to pinch/zoom/pan anywhere they want, including all through their own
+  turn's aiming and after they've fired - the camera does not chase the
+  shot. The next snap-to-active-avatar only happens when control passes
+  to the next character.
+- **This is a prerequisite phase, not a side effect of the ladder.**
+  Multi-planet placement (still open, below) only becomes meaningfully
+  designable once the field can actually be bigger than one screen, so
+  camera/pan-zoom needs to land as its own phase before the ladder's
+  placement question gets finalized/built.
+
+**Play field size: grows, but capped.** As more celestial objects get
+added over the course of the ladder (more planets, and per the "Orbital
+drift" note above and future ideas, eventually binary stars/black
+holes), the play field's bounds grow to fit them - but not without
+limit. Boo: "it has to stop at some point. we should have a certain
+number of limit to the size and that will be based on the number of
+celestial objects and their sizes." The actual cap formula (how object
+count/size maps to a max field size) is not decided yet - just captured
+as a real constraint, not an afterthought, for whenever the field-sizing
+logic actually gets built.
+
+**Missed shots don't despawn - they stay live, permanently, anywhere.**
+Boo confirmed explicitly and enthusiastically: a projectile that exits
+the play field is NOT destroyed. It keeps simulating for real (gravity
+and all) indefinitely, and if it ever drifts back and hits something -
+even the character who fired it - that's a real hit with real damage,
+not a visual-only flourish. "It absolutely can still cause damage. even
+to oneself. thats the unexpected element I like." This is a deliberate
+feature, not a bug to guard against.
+
+**Turn-ending trigger for a missed shot: play-field-boundary-based, not
+screen-based, and separate from the projectile's own lifetime.** Since a
+missed shot no longer ends anything by being destroyed, something else
+has to end the turn. Clarified twice by Boo since the first framing was
+imprecise: it is NOT about camera visibility (a projectile can be
+off-screen while pinch/zoom has the camera pointed elsewhere, but still
+be well inside the play field, and that does not start any timer). The
+timer only starts once the projectile actually crosses outside the play
+field's own boundary - "a few seconds outside the play field," not "a
+few seconds off screen." Once that timer elapses, control passes to the
+next avatar. The projectile itself is unaffected by this - it keeps
+existing and simulating, per the point above; the timer only gates when
+the *turn* ends, not the shot's lifetime.  Exact timer duration ("a few
+seconds") not tuned to a specific number yet - same pattern as
+`SHOT_FLIGHT_FREEZE_SECONDS` starting at a guess and getting tuned via
+on-device feel-testing.
+
+**Stray-projectile cap: 4 per side, 8 total, oldest-first eviction.**
+Since strays never despawn on their own and could in principle
+accumulate turn after turn over a long game (most concerning if one
+ends up in a stable-ish orbit outside the field and never wanders back
+in), Boo wants a hard cap to bound the memory/physics cost: "each player
+can have 4 stray shots for a total of 8." The two sides' caps are
+independent - a side's own oldest still-outside-the-field stray is
+quietly retired only when THAT side's own new miss would push it past
+its own 4; hitting the cap never affects the other side's strays. Chosen
+over "refuse to let a new shot go stray once the cap's hit" because that
+would make otherwise-identical shots behave inconsistently depending on
+how many strays happen to already be floating around - quietly retiring
+the oldest (already invisible, already out of mind) is the less jarring
+rule.
+
+**Planet/character placement: fully scattered, with a region-quota rule
+to prevent corner-hoarding.** This was the original question that kicked
+off the whole camera/play-field discussion above. Considered clustered-
+by-side ("home base" read, easy to parse, gravity mostly contained
+within a side) vs. fully scattered (no spatial concept of "sides" at
+all, ownership and proximity decoupled). Boo chose scattered - "fully
+scattered is much more interesting to me" - given how central gravity
+is to the whole game, decoupling ownership from position means gravity
+and stray-shot paths can meaningfully involve any planet regardless of
+who it belongs to, not just your own cluster.
+
+Pure independent-random placement doesn't actually deliver "scattered
+but not clumpy," though - the existing minimum-clearance rule (already
+used for today's 2-planet case: reject/retry if too close to the star
+or another object) only guarantees objects don't overlap or sit right
+on top of each other locally. It says nothing about the field as a
+whole, so it's entirely possible for most objects to land in one region
+by chance while the rest of a large field sits empty. Boo flagged this
+directly: "if field size is large, I dont want 6 objects clustered in a
+corner. some natural clustering is ok if it feels organic."
+
+**Decided approach - two independent rules, stacked:**
+1. **Minimum clearance** (existing rule, unchanged) - keeps placement
+   from overlapping/touching, same reject-and-retry pattern already in
+   use.
+2. **Region quota (new)** - the field is divided into a coarse grid of
+   regions, sized relative to the total number of objects being placed
+   (so it scales automatically as the field grows with the ladder), and
+   each region has a cap on how many objects it's allowed to hold.
+   Placement retries into a different region once a region hits its
+   cap. This is the layer that actually prevents corner-hoarding - it
+   guarantees field-wide spread without making placement feel grid-
+   snapped, since exact positions within an allowed region are still
+   randomly jittered, same organic-but-not-clumpy result procedural
+   generation normally uses for scattering trees/rocks/stars naturally.
+
+Exact numbers (region grid density, max objects per region) not tuned
+yet - same "reasonable starting guess, tune via on-device feel-testing"
+pattern as every other constant in this project
+(`SHOT_FLIGHT_FREEZE_SECONDS`, `MIN_PLANET_SEPARATION`, etc.). Boo
+confirmed writing this up as the design rather than debating the exact
+knobs now ("yes").
+
+**Still not decided - open threads for whenever they're picked back
+up:**
+- **Squad composition / AI behavior with multiple characters** - same
+  open item as flagged in the original "Campaign progression ladder"
+  design above, still open.
+- **Build order** for everything in this section - camera/pan-zoom
+  almost certainly needs to land first (see above), but the exact
+  phase sequencing hasn't been explicitly confirmed with Boo the way
+  the Phase 19-23 order was.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
