@@ -166,12 +166,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // input handoff happened essentially the instant the AI fired (its
         // own post-shot reposition is synchronous, not animated, so there
         // was no real gap between "missile leaves" and "player has full
-        // control again"). Flat freeze on BOTH directions of turn handoff
-        // for now - "I do not want either player to be able to move for 3
-        // seconds after the enemy has taken a shot." A more interesting
-        // version of this mechanic (Boo flagged it, not yet designed) is
-        // captured as a design note in PROJECT_STATE.md.
-        private const val SHOT_FLIGHT_FREEZE_SECONDS = 3f
+        // control again"). Flat freeze on BOTH directions of turn handoff -
+        // "I do not want either player to be able to move for 3 seconds
+        // after the enemy has taken a shot." Retuned 3f -> 5f after a
+        // testing pass (same session) - Boo wanted a longer pause, no other
+        // behavior change. A more interesting version of this mechanic
+        // (Boo flagged it, not yet designed) is captured as a design note
+        // in PROJECT_STATE.md.
+        private const val SHOT_FLIGHT_FREEZE_SECONDS = 5f
 
         // Phase 12 - illustrative, not tuned. Purely pacing (long enough
         // that the turn hand-off is visible, not so long it feels sluggish).

@@ -2614,6 +2614,7 @@ bullet in the Campaign progression ladder section above, still accurate.
 Boo, on-device: "once the ai has shot and the projectile is still in
 flight, I can start moving my character to get out of the way... for now
 though, I do not want either player to be able to move for 3 seconds
+(retuned to 5 seconds after a testing pass, same session)
 after they enemy has taken a shot."
 
 **Root cause.** The AI->player input handoff happened essentially the
@@ -2627,7 +2628,7 @@ fired missile was still simulating its real flight through
 "missile leaves" and "player can dodge it."
 
 **Fix - a flat, symmetric freeze, not a "wait for the missile to
-resolve" mechanic.** `PlayScreen.SHOT_FLIGHT_FREEZE_SECONDS` (3f)
+resolve" mechanic.** `PlayScreen.SHOT_FLIGHT_FREEZE_SECONDS` (5f - retuned up from an initial 3f the same session, after Boo tried it on-device and wanted a longer pause)
 starts counting down from `fireMissile()` - the single spawn point
 already shared by both the player's and the AI's shots - regardless of
 which side fired. While it's counting down, neither turn-handoff
@@ -2643,7 +2644,7 @@ callback performs its handoff immediately:
   `aiTurnController.startTurn(...)` - which does its OWN synchronous
   pre-shot `reposition()` the instant it's called - is what gets
   deferred the same way. This is the "either player" half of Boo's ask:
-  the AI doesn't get to reposition for 3 seconds after the player's own
+  the AI doesn't get to reposition for 5 seconds after the player's own
   shot either, even though a human can't exploit that side today.
 
 **Deliberately untouched: each side's own post-shot movement.** The
@@ -2671,17 +2672,17 @@ freeze, ahead of the existing "AI's turn..." / "Pre-shot: N left" /
 1. Sync Gradle, run on-device as usual.
 2. Let the AI take a shot and immediately try tapping the movement
    buttons while the missile is visibly still traveling - confirm they
-   do nothing until roughly 3 seconds after the shot, and the HUD reads
+   do nothing until roughly 5 seconds after the shot, and the HUD reads
    "Shot in flight..." during that window.
 3. Fire your own shot, then use your post-shot movement as normal
    ("take cover") - confirm this still works exactly as before, with no
    new delay on your OWN movement in the same turn.
 4. After your post-shot movement ends (budget exhausted or Pass tapped),
    confirm there's now a beat before "AI's turn..." appears and the AI
-   actually starts moving/aiming - roughly 3 seconds from when your shot
+   actually starts moving/aiming - roughly 5 seconds from when your shot
    left, not from when you tapped Pass.
-5. General feel check: does 3 seconds feel like the right pause, too
-   short, or too long? It's a flat illustrative number, easy to retune.
+5. General feel check: does 5 seconds feel like the right pause now, too
+   short, or too long? It's a flat illustrative number, easy to retune again.
 
 **Captured for later - "an interesting advanced version."** Boo flagged,
 without specifying details yet, that there's probably a more interesting
@@ -2692,7 +2693,7 @@ choice again (a genuine dodge) rather than forbidding it outright - e.g.
 a real-time reaction window, a movement action that costs something
 (steps, a cooldown, an ammo-like resource) if used reactively, or a
 partial freeze (some movement allowed, just not enough to fully evade a
-well-aimed shot). None of this is decided; the flat 3-second freeze
+well-aimed shot). None of this is decided; the flat 5-second freeze
 above is what's actually built, and this paragraph exists so a future
 session doesn't have to re-derive that Boo saw more potential here than
 the simple version.
