@@ -26,7 +26,7 @@ import com.badlogic.gdx.physics.box2d.BodyDef
 import com.badlogic.gdx.physics.box2d.CircleShape
 import com.badlogic.gdx.physics.box2d.FixtureDef
 import com.badlogic.gdx.physics.box2d.World
-import com.badlogic.gdx.utils.viewport.FitViewport
+import com.badlogic.gdx.utils.viewport.ExtendViewport
 import com.badlogic.gdx.utils.viewport.Viewport
 import kotlin.random.Random
 
@@ -133,12 +133,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // Sept 2026 session - see CameraGestureController's class doc
         // comment for MIN_ZOOM/MAX_ZOOM (the pinch-zoom range this sits
         // inside). The zoom level snapCameraToActiveAvatar uses to frame
-        // whoever just became active - tight enough to clearly show one
-        // avatar and its planet (see PROJECT_STATE.md's camera design note
-        // for the ~1.1-1.3 world-unit avatar-to-planet-center estimate
-        // this was picked relative to), loose enough to still show a bit
-        // of surrounding space. Starting guess, tune on-device.
-        private const val AVATAR_SNAP_ZOOM = 0.4f
+        // whoever just became active. First on-device test at 0.4 came
+        // back "way too zoomed" (Boo) - the planet filled most of the
+        // screen. 1.0 matches camera.zoom's own default and is exactly the
+        // framing this game always used before this camera system existed
+        // (both planets and the star visible together) - a known-good
+        // starting point rather than a fresh guess, though still tunable.
+        private const val AVATAR_SNAP_ZOOM = 1.0f
 
         // Scene tuning - hand-picked "game feel" numbers, not realistic ones,
         // same spirit as the orbital milestone's STAR_MASS/ORBIT_RADIUS (see
@@ -359,8 +360,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val MAX_MISSILE_SPEED = 15f
 
         // Phase 19c - UI visual pass. Star count deliberately modest -
-        // "doesn't overwhelm what we have so far" (Boo, explicit).
-        private const val STARFIELD_STAR_COUNT = 70
+        // "doesn't overwhelm what we have so far" (Boo, explicit). Bumped
+        // for the Sept 2026 camera session (see STARFIELD_EXTENT_MULTIPLIER
+        // below) - covering a much larger area at the original density
+        // would need close to 9x as many; this splits the difference
+        // (sparser than before per-unit-area, but no visible gaps at
+        // realistic pan/zoom-out distances) rather than multiplying draw
+        // calls by 9x for a background element. Starting guess either way.
+        private const val STARFIELD_STAR_COUNT = 320
+
+        // Sept 2026 session - the starfield used to be generated only
+        // across the exact WORLD_WIDTH x WORLD_HEIGHT game field, which was
+        // fine when the camera never moved. Now that pinch/pan/zoom (and
+        // ExtendViewport revealing more area on odd-aspect screens) can
+        // show well beyond that fixed rectangle, panning or zooming out far
+        // enough would reveal plain black space past the original star
+        // field's edge. This multiplies both spawn dimensions, centered on
+        // the same field center, so there's real backdrop well past
+        // MAX_ZOOM's most-zoomed-out range plus reasonable pan distance.
+        // Not aware of the future play-field-size cap (PROJECT_STATE.md,
+        // still undecided) - will likely want revisiting once that exists.
+        private const val STARFIELD_EXTENT_MULTIPLIER = 3f
 
         // Shared between renderStatsPanel (row height) and drawStatBar
         // (bar position) so they can't drift out of sync with each other
@@ -543,14 +563,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // Phase 19c - generated once (not per-game), fixed for this screen's
     // lifetime. Deliberately muted: brightness is capped well below full
     // white and radii stay small, so this reads as a backdrop rather than
-    // competing with the sprites/HUD drawn on top of it.
+    // competing with the sprites/HUD drawn on top of it. Sept 2026 session
+    // - spawn area widened to STARFIELD_EXTENT_MULTIPLIER x the game
+    // field, centered on the same field center, so panning/zooming (see
+    // CameraGestureController) doesn't run off the edge of the backdrop -
+    // see STARFIELD_EXTENT_MULTIPLIER's doc comment. Positions still
+    // render in world space via renderStarfield's camera.combined
+    // projection (so they do pan with the camera, giving a real sense of
+    // depth), but each star's on-screen SIZE is compensated for the
+    // current zoom there so it doesn't shrink/grow the way foreground
+    // gameplay objects correctly do - see that method's doc comment.
     private val starfieldStars: List<StarfieldStar> = buildList {
+        val spawnWidth = WORLD_WIDTH * STARFIELD_EXTENT_MULTIPLIER
+        val spawnHeight = WORLD_HEIGHT * STARFIELD_EXTENT_MULTIPLIER
+        val centerX = WORLD_WIDTH / 2f
+        val centerY = WORLD_HEIGHT / 2f
         repeat(STARFIELD_STAR_COUNT) {
             val brightness = 0.30f + Random.nextFloat() * 0.40f
             add(
                 StarfieldStar(
-                    x = Random.nextFloat() * WORLD_WIDTH,
-                    y = Random.nextFloat() * WORLD_HEIGHT,
+                    x = centerX + (Random.nextFloat() - 0.5f) * spawnWidth,
+                    y = centerY + (Random.nextFloat() - 0.5f) * spawnHeight,
                     radius = 0.012f + Random.nextFloat() * 0.028f,
                     color = Color(brightness, brightness, (brightness * 1.08f).coerceAtMost(1f), 1f)
                 )
@@ -577,7 +610,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         randomizePlanetPositions()
 
         camera = OrthographicCamera()
-        viewport = FitViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)
+        // Sept 2026 session - was FitViewport, which letterboxes (black
+        // bars) whenever the device's actual aspect ratio doesn't match
+        // WORLD_WIDTH:WORLD_HEIGHT - confirmed on-device on a foldable's
+        // squarer-than-9:16 main screen. Boo: "whether in portrait,
+        // landscape or on a foldable device, the visible part of the
+        // playing field goes to the bezel." ExtendViewport keeps
+        // WORLD_WIDTH x WORLD_HEIGHT as a MINIMUM guaranteed-visible area
+        // (nothing about game-world placement/logic changes - every other
+        // WORLD_WIDTH/WORLD_HEIGHT reference in this file still means the
+        // same fixed 9x16 game field) and extends whichever axis is needed
+        // to fill the real screen exactly, without stretching/distorting
+        // anything - so a squarer or wider-than-9:16 screen just reveals
+        // more starfield at the edges instead of black bars.
+        viewport = ExtendViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)
         camera.position.set(WORLD_WIDTH / 2f, WORLD_HEIGHT / 2f, 0f)
         cameraGestureController = CameraGestureController(
             camera = camera,
@@ -1105,15 +1151,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT)
 
         // World-space rendering happens inside whatever rectangle [viewport]
-        // (a FitViewport locked to WORLD_WIDTH:WORLD_HEIGHT) currently
-        // occupies on screen - on a device whose physical aspect ratio is
-        // far from that ratio (a foldable's main screen opened flat, far
-        // squarer than 9:16, is the case that exposed this), FitViewport
-        // letterboxes: it shrinks/centers its GL viewport rather than using
-        // the full screen. Explicitly re-applying it here guarantees that
-        // rectangle is what's active for world content specifically, no
-        // matter what the HUD rendering below last left the GL viewport set
-        // to.
+        // (an ExtendViewport - see its construction in init{} for why it
+        // replaced the original FitViewport) currently occupies on screen.
+        // Explicitly re-applying it here guarantees that rectangle is
+        // what's active for world content specifically, no matter what the
+        // HUD rendering below last left the GL viewport set to.
         viewport.apply()
         camera.update()
         renderStarfield()
@@ -1153,12 +1195,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * See [starfieldStars] for why it's generated once and kept
      * deliberately dim/small rather than regenerated or made brighter.
      */
+    /**
+     * Sept 2026 session - Boo, testing the new pinch-zoom camera: "I zoomed
+     * out and the objects got smaller. again that's good but notice how
+     * the starfield also shrinks." Foreground gameplay objects (planets,
+     * avatars, missiles) are meant to shrink with zoom - that's just
+     * correct perspective. A background starfield reads wrong doing the
+     * same thing, the same reason a real distant backdrop doesn't visibly
+     * change size as you zoom a camera. Fix: multiply each star's world-
+     * space radius by camera.zoom before drawing it, canceling out exactly
+     * the per-world-unit screen-pixel change zooming causes, so a star's
+     * ON-SCREEN size stays roughly constant at any zoom level - positions
+     * still pan with the world normally (still projected via
+     * camera.combined below), only the size compensation is new.
+     */
     private fun renderStarfield() {
         shapeRenderer.projectionMatrix = camera.combined
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
         for (star in starfieldStars) {
             shapeRenderer.color = star.color
-            shapeRenderer.circle(star.x, star.y, star.radius, 8)
+            shapeRenderer.circle(star.x, star.y, star.radius * camera.zoom, 8)
         }
         shapeRenderer.end()
     }
@@ -1642,7 +1698,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     override fun resize(width: Int, height: Int) {
         // Sept 2026 session - viewport.update(..., true) unconditionally
-        // recenters camera.position to world-center (FitViewport's own
+        // recenters camera.position to world-center (ExtendViewport's own
         // behavior, not something this project controls), which would
         // silently discard wherever the player had pinch/panned to on
         // every rotation/window-resize. Stash and restore it around the

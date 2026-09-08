@@ -3049,11 +3049,67 @@ with multiple characters, the play-field-boundary stray-shot timer, and
 the 4-per-side stray-shot cap. This phase is camera plumbing only - the
 prerequisite those depend on, not those themselves.
 
+### Phase 24 addendum: first on-device test fixes
+
+Boo tested on a foldable (screenshots) and found three things worth
+fixing before this phase is really done:
+
+1. **AVATAR_SNAP_ZOOM was way too tight.** 0.4 filled most of the screen
+   with just the active planet - "way too zoomed." Bumped to **1.0**,
+   which isn't a fresh guess: it's exactly camera.zoom's own default,
+   and matches the framing this game always used before this camera
+   system existed at all (both planets and the star visible together).
+   With only 2 planets in play right now this mostly looks like the
+   classic view again - the snap's actual "frame just this one
+   character" effect will read more clearly once multi-planet layouts
+   exist.
+2. **Black bars on non-9:16 screens.** The foldable's main screen,
+   opened flat, is far squarer than the fixed 9:16 `WORLD_WIDTH`:
+   `WORLD_HEIGHT` ratio - visible in Boo's screenshots as black bars
+   down both sides, circled. That was `FitViewport` letterboxing by
+   design (see the removed comment this session deleted for the exact
+   old reasoning). Boo: "whether in portrait, landscape or on a
+   foldable device, the visible part of the playing field goes to the
+   bezel." Swapped `FitViewport` -> **`ExtendViewport`**: `WORLD_WIDTH`/
+   `WORLD_HEIGHT` become a guaranteed MINIMUM visible area rather than a
+   locked aspect ratio: whichever axis is needed extends to fill the
+   real screen exactly, no stretching/distortion, no bars - a squarer or
+   wider screen just reveals more backdrop at the edges. Nothing about
+   where planets/the star/celestial bodies get placed changes - every
+   other `WORLD_WIDTH`/`WORLD_HEIGHT` reference in the file still means
+   the same fixed 9x16 game field; only how much of the surrounding
+   screen gets filled with rendered content changed.
+3. **The starfield shrank with zoom.** Boo: "I zoomed out and the
+   objects got smaller. again that's good but notice how the starfield
+   also shrinks." Foreground gameplay objects correctly shrinking as you
+   zoom out is right; a background backdrop doing the exact same thing
+   reads wrong - real distant stars don't visibly change size as you
+   zoom a camera. Fixed two separate things:
+   - `renderStarfield()` now multiplies each star's radius by
+     `camera.zoom` before drawing - cancels out exactly the per-world-
+     unit screen-pixel change zooming causes, so a star's on-screen size
+     stays roughly constant at any zoom level. Positions still pan with
+     the world normally (unchanged), only the size compensation is new.
+   - The starfield's spawn area was also just the exact `WORLD_WIDTH` x
+     `WORLD_HEIGHT` rectangle, a leftover from when the camera never
+     moved - once pinch/pan/zoom (plus `ExtendViewport` revealing more
+     area on odd-aspect screens) can show well past that fixed
+     rectangle, panning or zooming out far enough would have run off
+     the backdrop into plain black space. `STARFIELD_EXTENT_MULTIPLIER`
+     (3x both dimensions, centered on the same field center) and
+     `STARFIELD_STAR_COUNT` (70 -> 320, a deliberate compromise - full
+     9x density for 9x the area would be close to 630 stars/9x the draw
+     calls for a background element) both cover this now. Not aware of
+     the future play-field-size cap (still undecided, see the "Multi-
+     character combat" design note above) - likely wants revisiting
+     once that exists rather than being a permanent fixed multiplier.
+
 ### How to test Phase 24 on-device
 
 1. Sync Gradle, run on-device as usual.
-2. Confirm the game still starts framed tightly on your own avatar (not
-   the old full-field view) - this is the new initial snap.
+2. Confirm the game starts framed on your own avatar, at roughly the
+   classic full-field zoom level (both planets/the star visible), not
+   the earlier too-tight framing.
 3. During your own turn, pinch with two fingers to zoom in/out, and drag
    with two fingers to pan around - confirm one finger alone still only
    ever moves/aims exactly as before, never pans the camera.
@@ -3067,15 +3123,21 @@ prerequisite those depend on, not those themselves.
    handoff actually happens (after the shot-flight freeze expires).
 6. Confirm the same snap happens in reverse once the AI's turn ends and
    control returns to you.
-7. Rotate the device (or resize the window, if testing on an emulator)
+7. On the foldable (or any non-9:16 screen/orientation), confirm the
+   play field now fills all the way to the bezel - no black bars on any
+   edge, in portrait, landscape, or folded-flat.
+8. Rotate the device (or resize the window, if testing on an emulator)
    mid-game after having panned away from center - confirm the view
-   re-letterboxes for the new aspect ratio but does NOT jump back to
-   world-center.
-8. General feel check: does AVATAR_SNAP_ZOOM (0.4) frame each avatar at
-   a good level - too tight, too loose? Does the pinch-zoom range
-   (0.25-2.5) let you zoom further than useful, or not far enough, given
-   the current fixed field size? Both are starting guesses, easy to
-   retune.
+   re-fits the new screen shape but does NOT jump back to world-center.
+9. Zoom out as far as MAX_ZOOM allows and pan toward an edge - confirm
+   there's still visible starfield, no plain black void, and that
+   individual stars look roughly the same size as they did before
+   zooming out (not visibly shrunk).
+10. General feel check: does AVATAR_SNAP_ZOOM (1.0) frame things well
+    now? Does the pinch-zoom range (0.25-2.5) feel right given the
+    current fixed field size? Does the starfield's new density (320
+    stars over a 3x-wider area) look right, or too sparse/too busy?
+    All still starting guesses, easy to retune further.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
