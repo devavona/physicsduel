@@ -945,6 +945,31 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // step loop is synchronous.
         projectileContactListener.flushRemovals(world)
 
+        // Phase 22 - win/loss detection, character HP only (a destroyed
+        // planet does NOT end the game by itself - see PROJECT_STATE.md's
+        // Phase 22 entry for the confirmed scope call and the orbital-drift
+        // follow-up that's meant for a defeated-planet-but-still-alive
+        // character instead). Reads straight off HealthComponent the same
+        // "still readable after the entity's been removed from the engine"
+        // way renderStatsPanel already relies on for planet mass - see
+        // targetPlanetEntity's doc comment for why that's safe. Checked
+        // every frame right after flushRemovals, so a defeat is caught the
+        // same frame the fatal hit actually resolves.
+        val playerHealth = healthMapper.get(avatarEntity)
+        val targetHealth = healthMapper.get(targetCharacterEntity)
+        if (playerHealth.isDefeated) {
+            SaveManager.recordRunEnded() // Phase 6 - same "persist before tearing down" step PauseScreen's manual quit already does
+            dispose() // this run is genuinely over - see dispose()'s own doc comment
+            game.setScreen(GameOverScreen(game, won = false))
+            return
+        }
+        if (targetHealth.isDefeated) {
+            SaveManager.recordRunEnded()
+            dispose()
+            game.setScreen(GameOverScreen(game, won = true))
+            return
+        }
+
         for (entity in engine.getEntitiesFor(trailFamily)) {
             trailMapper.get(entity).recordPosition(physicsBodyMapper.get(entity).body.position)
         }
@@ -1485,7 +1510,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     override fun dispose() {
         // Box2D World and the debug renderer both hold native memory - must be
         // disposed explicitly or it leaks. Called explicitly by whoever ends
-        // this run permanently (currently: PauseScreen's "end run" tap zone),
+        // this run permanently - PauseScreen's "end run" tap zone, or (Phase
+        // 22) render() itself the instant a real win/loss is detected -
         // never automatically by the Game/Screen lifecycle.
         world.dispose()
         debugRenderer.dispose()

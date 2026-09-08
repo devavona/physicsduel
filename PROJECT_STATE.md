@@ -2455,6 +2455,109 @@ physics logic changed - the sources list was just missing an entry.
    between the two sides? This was the root cause behind some of the odd
    AI shot behavior noted earlier.
 
+## Phase 22: win/loss detection + New Game
+
+First real use of `GameOverScreen`, which until now was only a stand-in
+reachable via `PauseScreen`'s "end run" tap zone with no real trigger
+behind it, and always showed the same generic "GAME OVER" text.
+
+**Win condition, confirmed scope call:** character HP only
+(`HealthComponent.isDefeated`). Destroying a planet (`GravitySourceComponent
+.isDestroyed`) does NOT by itself end the game - Boo, explicitly: "character
+only." A defeated-planet-but-still-alive character is its own follow-up,
+see the Phase 23 design note below.
+
+**How it works.** `PlayScreen.render()` checks both `HealthComponent`s
+right after `flushRemovals` each frame - the same point damage from that
+frame's contacts has already resolved. Whichever character is defeated
+first ends the run: `SaveManager.recordRunEnded()` (Phase 6's existing
+persist-before-teardown step, same one `PauseScreen`'s manual quit already
+used), `dispose()` (this `PlayScreen` instance's own native resources -
+Box2D `World`, textures, batches - previously only ever freed by
+`PauseScreen`'s "end run" path; skipping this on a real win/loss would
+have quietly leaked every time a run actually finished normally), then
+`game.setScreen(GameOverScreen(game, won = ...))`.
+
+**`GameOverScreen` is now a real outcome screen**, not a stand-in: takes a
+`won: Boolean`, shows "VICTORY" (dark green background) or "DEFEAT" (dark
+red, the color it always used), and tapping starts a brand new
+`PlayScreen` directly - same "fresh instance every time" pattern
+`MenuScreen`'s own tap-to-play already uses - instead of going back to the
+menu first. `PauseScreen`'s manual "end run" quit now passes `won = false`
+(there's no neutral third state built, so a manual quit reads the same as
+a loss).
+
+### How to test Phase 22 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Let the AI defeat your character (4 direct hits at the current
+   illustrative HP/damage numbers) and confirm you land on a red
+   "DEFEAT" screen, not the old generic "GAME OVER" text.
+3. Tap the DEFEAT screen and confirm it drops you straight into a brand
+   new run (fresh random planet layout, full HP/mass on both sides) -
+   not back to the main menu.
+4. Defeat the AI's character and confirm a green "VICTORY" screen
+   instead, same tap-for-new-game behavior.
+5. Pause mid-run and tap "END RUN" - confirm it still reaches the same
+   screen (as a DEFEAT-styled outcome, since a manual quit isn't a real
+   win), same as before this phase.
+6. Play a couple of full runs back-to-back through the New Game flow and
+   confirm nothing looks stale/leftover from the previous run (planet
+   positions, HP bars, mass bars should all be fresh).
+
+## Phase 23 (future): orbital drift for a defeated-planet-but-alive character - captured design note (Sept 2026 session, not yet built)
+
+Boo's follow-up the moment win/loss scope came up: what happens to a
+character whose planet gets destroyed while they still have HP left?
+Right now nothing - the avatar/AI position is purely a walked angle
+around a fixed `planetCenter` (`AvatarMovementController`/
+`AiTurnController` - there's no physics body driving it, no free
+movement at all), so a destroyed planet leaves that character with
+nothing under their own logic to stand on and no defined behavior.
+
+**Boo's confirmed design**, from the on-device discussion:
+- The character becomes a free orbital object, given some initial
+  velocity **perpendicular to the destroyed planet's former center** (a
+  tangential "flung into orbit" kick, not a random direction) at the
+  moment of destruction, then drifts under the gravity of whatever
+  bodies remain (the star, and the surviving planet if any) - a real
+  physics body from that point on, not the angle-around-a-fixed-center
+  model the avatar uses today.
+- They keep the ability to aim and fire on their turn from wherever
+  they've drifted to ("Still aim/fire" - confirmed over "no control at
+  all"). They lose the walk-around-the-planet movement budget entirely
+  (nothing to stand on), but aiming/firing itself isn't blocked.
+- Hitting the star kills the character outright - confirmed, same
+  finality as a direct missile defeat.
+- Landing on a planet or moon (the surviving one, or any future
+  additional body) deals exactly one point of damage on impact, "which
+  may or may not kill them" depending on HP left - not an instant kill
+  like the star, just another hit.
+
+**Confirmed sequencing: its own phase**, after Phase 22 lands, not folded
+into it - Boo: "Split into its own phase (Recommended)." Reasoning
+this earned separate scope, for whichever future session picks it up:
+- It's a genuinely different movement model from anything that exists
+  today - every other moving thing in this game (avatar, AI, missiles)
+  is either an angle-around-a-fixed-center walk or a
+  `TrajectorySimulator`-style ballistic sim triggered once per shot; this
+  is the first *persistent, continuously-integrated, multi-turn* free
+  body driven by `GravitySystem`.
+- "Landing" needs its own definition that doesn't exist yet - does the
+  character stick to the surface at the point of impact (a new fixed
+  angle-around-center position, effectively re-anchoring them the way
+  they started), bounce, or something else? Not settled by the
+  discussion above, deliberately left for whoever scopes Phase 23 itself.
+- Needs a decision on whether this character keeps orbiting indefinitely
+  (multiple turns of drift) or the drift only covers the time between
+  turns, with their position "frozen" in place while waiting for their
+  next turn to aim/fire - not yet decided.
+- Overlaps with the still-open planet-overlap bug and the star-flight-path
+  clearance work from Phase 20 - a drifting character's path needs the
+  same kind of collision/clearance thinking those phases already dealt
+  with for missiles, just applied to a persistent body instead of a
+  one-shot simulated trajectory.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

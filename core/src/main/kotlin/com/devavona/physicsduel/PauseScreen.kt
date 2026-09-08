@@ -68,7 +68,11 @@ class PauseScreen(
         } else {
             SaveManager.recordRunEnded() // Phase 6: persist before tearing anything down
             playScreen.dispose() // permanently ending this run - see PlayScreen's doc comment on why this matters
-            game.setScreen(GameOverScreen(game))
+            // Manual quit, not a real win/loss - GameOverScreen now needs a
+            // won/lost outcome (Phase 22), and there's no neutral third
+            // state built, so this gets the same visual treatment as an
+            // actual defeat.
+            game.setScreen(GameOverScreen(game, won = false))
         }
         return true
     }
