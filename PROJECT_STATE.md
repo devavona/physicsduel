@@ -2286,6 +2286,21 @@ symmetric baseline. Test: fire a few shots along the exact same pull each
 time and confirm they land slightly differently, the same "imperfect but
 not wild" feel the AI's shots already have.
 
+**Planet-overlap bug report - archived, not reproduced since (Sept 2026
+session).** Same testing batch as the player-accuracy fix above, Boo's
+report at the time: "a couple of times the planets slightly overlapped.
+need some error correction to prevent that." Investigated by re-deriving
+the placement math rather than guessing at a fix: `MIN_PLANET_SEPARATION`
+(4) vs. the two planets' combined diameter (1.6) leaves roughly 2.4 units
+of guaranteed clear space between their centers under the rules above -
+true overlap should be essentially impossible given that math, outside
+some not-yet-identified edge case (possibly the `PLANET_PLACEMENT_MAX_ATTEMPTS`
+fallback path, never confirmed). No fix was ever made - deliberately not
+blind-patched without being able to see what was actually touching what.
+**Archived (Boo, this session): hasn't recurred since, not chasing it
+further for now.** If it resurfaces, a screenshot is what would actually
+let this get root-caused rather than guessed at - the same ask as before.
+
 ## Weapon accuracy & ammo types - captured design note (Sept 2026 session, not yet built)
 
 Boo's bigger idea, offered alongside the player-accuracy fix above:
@@ -2552,11 +2567,13 @@ this earned separate scope, for whichever future session picks it up:
   (multiple turns of drift) or the drift only covers the time between
   turns, with their position "frozen" in place while waiting for their
   next turn to aim/fire - not yet decided.
-- Overlaps with the still-open planet-overlap bug and the star-flight-path
-  clearance work from Phase 20 - a drifting character's path needs the
-  same kind of collision/clearance thinking those phases already dealt
-  with for missiles, just applied to a persistent body instead of a
-  one-shot simulated trajectory.
+- Overlaps with the archived planet-overlap bug report (see Phase 20's
+  addendum - not reproduced since, but worth a second look if a
+  persistent drifting body starts exposing it again) and the
+  star-flight-path clearance work from Phase 20 - a drifting character's
+  path needs the same kind of collision/clearance thinking those phases
+  already dealt with for missiles, just applied to a persistent body
+  instead of a one-shot simulated trajectory.
 
 ## Phase 23: win-only progression counter (escalation ladder itself, still deferred)
 
