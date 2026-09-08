@@ -2325,6 +2325,35 @@ future session picks it up:
   - `ProjectileContactListener` currently only ever damages whatever the
   missile directly touches.
 
+**Sub-note: where in the shot is error applied? (Sept 2026, not changing now)**
+Both the player's and AI's aim error currently apply at a single point -
+right at release/fire (`applyAimError`, called once on the final velocity
+just before `onFire`/the search's return, per `SlingshotInputProcessor`
+and `AiTurnController` - see their doc comments). So the whole flight
+after release is deterministic; only the launch is fuzzed. Boo, on
+noticing this: "having the error... at the point of release definitely
+adds a bit of complexity and randomness. I dont want to change it. just a
+note for future consideration as to at what point or points of the path
+errors are introduced." Explicitly not a request to change anything -
+just flagging it as a design axis worth revisiting whenever the weapon
+system above gets built, since different weapons could plausibly want
+error at different points along the shot rather than only at release:
+- **Release-only (current).** One random nudge to angle/speed at the
+  moment of firing, then a perfectly deterministic gravity-aware flight.
+  Simple, and matches "you aimed slightly wrong," but every shot's error
+  is fully knowable from the instant it's fired - nothing changes mid-flight.
+- **In-flight perturbation.** Small continuous or periodic force
+  jitter/wobble applied to the projectile during simulation, not just at
+  launch - would make trajectories feel less "locked in" once fired, at
+  the cost of `TrajectorySimulator`'s preview line no longer exactly
+  matching what actually happens (a real design tradeoff, not just an
+  implementation detail).
+- **Weapon-dependent error profile.** Ties naturally into the laser/
+  missile/bomb idea above - e.g. lasers get release-only (or none, if
+  "high accuracy" means near-zero), missiles keep today's release-only
+  jitter, bombs could plausibly get in-flight wobble to sell "low
+  accuracy, unpredictable" rather than just a wider one-time cone.
+
 ## Phase 21: planet damage visuals (craters/scorch overlay)
 
 Resolves the "Damage visual, decided" note above - craters/scorch marks
@@ -2353,12 +2382,8 @@ appears exactly where you hit it." A true per-impact decal system would
 need to record hit positions/angles on the sphere, which is a bigger
 feature than this phase's scope.
 
-**Only the target planet, deliberately.** The launch planet still has no
-`GravitySourceComponent` at all (unchanged since Phase 8/11 - see that
-scope note) and can't currently take damage, so it gets no overlay. Once
-the launch planet is ever made damageable (a natural fit for wiring up
-the player's own planet symmetrically), the same overlay/alpha approach
-extends to it directly - no new mechanism needed, just a second draw call.
+**Originally the target planet only** - see the "Phase 21 addendum"
+below for why that's no longer true.
 
 **Untouched by this phase, deliberately:** the planet's actual rendered
 size, its Box2D fixture radius, and `PLANET_RADIUS` itself - true
@@ -2373,11 +2398,62 @@ something this phase touches.
 3. Land a second, third, and fourth hit and confirm the craters get
    progressively more visible/darker each time, most pronounced right as
    the planet is destroyed.
-4. Confirm the launch planet (yours) never shows any overlay - expected,
-   not a bug, per the "only the target planet" note above.
+4. Confirm the launch planet (yours) now shows the same overlay behavior
+   under hits - see the addendum below; this used to be "expected, no
+   overlay" but that's changed.
 5. If the craters read as too subtle or too harsh at any damage stage,
    tell me roughly what you saw - `damage_overlay.png`'s crater
    strengths are a quick regenerate, not a code change.
+
+### Phase 21 addendum: launch planet made a symmetric gravity source too
+
+Boo, on-device: "the players planet doesnt seem to take any damage."
+Root cause: the launch planet never had a `GravitySourceComponent` at
+all - Phase 11 deliberately scoped gravity/damage to just the target
+planet first ("to keep the number of new gravity sources Boo is feeling
+out at once to just one"), with an explicit old comment noting "every
+celestial body is confirmed to eventually exert gravity, this is just an
+incremental rollout." Confirmed to close that gap now: "yes. that also
+explains some other shooting behavior. knowing the home planet is not
+influencing path explains it" - the launch planet wasn't pulling on
+anything, so every shot near it (the AI's included) was missing a real
+source of gravity the whole time.
+
+**What changed.** The launch planet now gets identical treatment to the
+target planet: same mass (`LAUNCH_PLANET_MASS = TARGET_PLANET_MASS`),
+wrapped in its own ECS `Entity` with `PhysicsBodyComponent` +
+`GravitySourceComponent` (`launchPlanetEntity`, mirroring
+`targetPlanetEntity`), added to the engine the same way. No AI or
+trajectory code needed to change at all - `GravitySystem.currentSources()`
+already queries generically for any entity with a `GravitySourceComponent`,
+and `AiTurnController`/`TrajectorySimulator` already loop over whatever
+list of sources they're handed. `drawDamageOverlayIfDamaged` (extracted
+from the old target-only inline logic) now runs for both planets, and
+`renderStatsPanel` gained a "Player Planet Mass" HUD row, paired with
+Player HP the same way "Target Planet Mass" is paired with Target HP.
+
+**Why this also explains shooting behavior.** Every trajectory
+calculation (player aim preview, AI's `bestAimFor` search) sums gravity
+from every current source. With the launch planet contributing nothing,
+shots passing near it flew straighter than they should have, and the
+AI's own repositioning search was optimizing against an incomplete
+picture of the gravity field around its own launch point. No search or
+physics logic changed - the sources list was just missing an entry.
+
+### How to test the Phase 21 addendum on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Confirm the HUD now shows a "Player Planet Mass" bar alongside your
+   HP, matching the target's mass bar in style.
+3. Land AI hits on your own planet and confirm both the mass bar drops
+   and the crater overlay appears/darkens on your planet, the same way
+   it already does for the target.
+4. Take a shot that passes close to your own launch planet and confirm
+   it now visibly curves/gets pulled near it, the same way shots already
+   curve near the target planet.
+5. General play-feel check: does gravity now feel more symmetric/fair
+   between the two sides? This was the root cause behind some of the odd
+   AI shot behavior noted earlier.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

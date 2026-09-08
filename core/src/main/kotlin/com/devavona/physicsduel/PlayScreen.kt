@@ -152,6 +152,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // ProjectileContactListener.CELESTIAL_MASS_DAMAGE (0.5f) for the
         // same illustrative "4 hits to destroy" as the character target.
         private const val TARGET_PLANET_MASS = 2f
+        // On-device bug fix: the launch planet had no gravity/damage at
+        // all until now (see the removed "Launch planet deliberately
+        // unchanged" comment near where it's created) - Boo noticed his
+        // own planet never took damage, which also explained some AI
+        // shooting behavior he'd seen (it wasn't accounting for a pull
+        // that didn't exist). Same mass as the target planet, for a fair
+        // symmetric fight.
+        private const val LAUNCH_PLANET_MASS = TARGET_PLANET_MASS
 
         // Phase 12 - illustrative, not tuned. Purely pacing (long enough
         // that the turn hand-off is visible, not so long it feels sluggish).
@@ -514,6 +522,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // engine (on destruction) so renderStatsPanel can still read its
     // final mass/isDestroyed state - see that method.
     private lateinit var targetPlanetEntity: Entity
+    /** Same pattern as [targetPlanetEntity], for the launch planet once it also became a real gravity source - see that field's doc comment. */
+    private lateinit var launchPlanetEntity: Entity
 
     init {
         Box2D.init()
@@ -548,15 +558,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             }
         )
 
-        // Launch planet deliberately unchanged since Phase 8 - still a
-        // plain non-gravity static Box2D body, not added to the ECS at all
-        // (nothing about it needs an Ashley query). Only the target planet
-        // below gets Phase 11's mutable-mass/gravity treatment this phase,
-        // to keep the number of new gravity sources Boo is feeling out at
-        // once to just one - see PROJECT_STATE.md's "Phase 11" entry. Every
-        // celestial body is confirmed to eventually exert gravity, this is
-        // just an incremental rollout, not a final design line.
-        createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)
+        // On-device bug fix: the launch planet used to be deliberately left
+        // as a plain non-gravity static Box2D body (Phase 11 rolled the
+        // mutable-mass/gravity treatment out to just the target planet
+        // first, "to keep the number of new gravity sources Boo is feeling
+        // out at once to just one"). Boo noticed his own planet never took
+        // any damage, and that the AI's shots looked wrong in ways that
+        // make sense once you know his planet was never pulling on
+        // anything - both planets now get identical treatment.
+        launchPlanetEntity = Entity().apply {
+            add(PhysicsBodyComponent(createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)))
+            add(GravitySourceComponent(initialMass = LAUNCH_PLANET_MASS))
+        }
+        engine.addEntity(launchPlanetEntity)
         targetPlanetEntity = Entity().apply {
             add(PhysicsBodyComponent(createPlanet(targetPlanetPosition.x, targetPlanetPosition.y)))
             add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
@@ -569,8 +583,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // formula. Shared with PlayScreen's own Phase 16 aim preview (see
         // celestialObstacles) - fixed geometry (center + radius), not live
         // Box2D references - see AiTurnController.Obstacle's doc comment;
-        // a destroyed target planet (Phase 11) still counts as an obstacle
-        // here, a known minor gap, not addressed this phase.
+        // a destroyed planet (either one, now that both are damageable)
+        // still counts as an obstacle here, a known minor gap, not
+        // addressed this phase.
         celestialObstacles = listOf(
             AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
             AiTurnController.Obstacle(Vector2(launchPlanetPosition), PLANET_RADIUS),
@@ -1015,23 +1030,32 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
         worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
 
-        // Phase 21 - fade the damage overlay in as the target planet loses
-        // mass (0 = pristine/invisible, 1 = fully destroyed/fully visible).
-        // Reads straight from the same GravitySourceComponent the stats
-        // panel already uses, via the same "entity may have been removed
-        // from the engine but its component data is still readable" trick
-        // renderStatsPanel relies on - see targetPlanetEntity's own doc
-        // comment for why that's safe.
-        val targetSource = gravitySourceMapper.get(targetPlanetEntity)
-        if (targetSource != null) {
-            val damageRatio = (1f - targetSource.mass / targetSource.initialMass).coerceIn(0f, 1f)
-            if (damageRatio > 0f) {
-                worldBatch.setColor(1f, 1f, 1f, damageRatio)
-                worldBatch.draw(damageOverlayTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
-                worldBatch.setColor(1f, 1f, 1f, 1f)
-            }
-        }
+        // Phase 21, extended to both planets once the launch planet also
+        // became damageable (see drawDamageOverlayIfDamaged's doc comment).
+        drawDamageOverlayIfDamaged(launchPlanetEntity, launchPlanetPosition, planetDiameter)
+        drawDamageOverlayIfDamaged(targetPlanetEntity, targetPlanetPosition, planetDiameter)
         worldBatch.end()
+    }
+
+    /**
+     * Phase 21 - fades [damageOverlayTexture] in as [entity]'s planet
+     * loses mass (0 = pristine/invisible, 1 = fully destroyed/fully
+     * visible). Reads straight from the same GravitySourceComponent the
+     * stats panel already uses, via the same "entity may have been
+     * removed from the engine but its component data is still readable"
+     * trick renderStatsPanel relies on - see targetPlanetEntity's own doc
+     * comment for why that's safe. Originally target-planet-only; now
+     * shared since the launch planet became a symmetric gravity source
+     * too (Boo, on-device: "the players planet doesnt seem to take any
+     * damage").
+     */
+    private fun drawDamageOverlayIfDamaged(entity: Entity, position: Vector2, diameter: Float) {
+        val source = gravitySourceMapper.get(entity) ?: return
+        val damageRatio = (1f - source.mass / source.initialMass).coerceIn(0f, 1f)
+        if (damageRatio <= 0f) return
+        worldBatch.setColor(1f, 1f, 1f, damageRatio)
+        worldBatch.draw(damageOverlayTexture, position.x - PLANET_RADIUS, position.y - PLANET_RADIUS, diameter, diameter)
+        worldBatch.setColor(1f, 1f, 1f, 1f)
     }
 
     /**
@@ -1349,13 +1373,21 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val playerLabel = if (playerHealth.isDefeated) "Player: DEFEATED" else "Player HP"
         val playerValue = "%d/%d".format(playerHealth.currentHp, playerHealth.maxHp)
 
+        // Ratio against GravitySourceComponent.initialMass (Phase 19c also
+        // adds that property) rather than an arbitrary scale - see
+        // Components.kt. Player Planet Mass added once the launch planet
+        // became a symmetric gravity source too (Boo, on-device: "the
+        // players planet doesnt seem to take any damage") - same pattern
+        // as the target planet's row below, just paired with its own
+        // character's HP row instead of appended at the end.
+        val launchSource = gravitySourceMapper.get(launchPlanetEntity)
+        val launchMassLabel = if (launchSource.isDestroyed) "Player Planet: DESTROYED" else "Player Planet Mass"
+        val launchMassValue = "%.1f".format(launchSource.mass)
+
         val targetHealth = healthMapper.get(targetCharacterEntity)
         val targetLabel = if (targetHealth.isDefeated) "Target: DEFEATED" else "Target HP"
         val targetValue = "%d/%d".format(targetHealth.currentHp, targetHealth.maxHp)
 
-        // Ratio against GravitySourceComponent.initialMass (Phase 19c also
-        // adds that property) rather than an arbitrary scale - see
-        // Components.kt.
         val targetSource = gravitySourceMapper.get(targetPlanetEntity)
         val massLabel = if (targetSource.isDestroyed) "Target Planet: DESTROYED" else "Target Planet Mass"
         val massValue = "%.1f".format(targetSource.mass)
@@ -1364,6 +1396,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             minContentWidth,
             HudFont.widthOf(turnLabel),
             HudFont.widthOf(playerLabel) + labelValueGap + HudFont.widthOf(playerValue),
+            HudFont.widthOf(launchMassLabel) + labelValueGap + HudFont.widthOf(launchMassValue),
             HudFont.widthOf(targetLabel) + labelValueGap + HudFont.widthOf(targetValue),
             HudFont.widthOf(massLabel) + labelValueGap + HudFont.widthOf(massValue)
         )
@@ -1373,7 +1406,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // pixel count - see the doc comment on the companion object's
         // STATS_* constants and PROJECT_STATE.md's Phase 19c entry.
         val rowHeight = HudFont.font.lineHeight + HudFont.scaled(STATS_BAR_GAP_BELOW_TEXT) + HudFont.scaled(STATS_BAR_HEIGHT) + HudFont.scaled(STATS_ROW_GAP)
-        val panelHeight = panelPadding * 2f + rowHeight * 4
+        val panelHeight = panelPadding * 2f + rowHeight * 5
         val panelTop = Gdx.graphics.height - HudFont.scaled(56f)
         val panelX = margin
         val panelY = panelTop - panelHeight
@@ -1389,6 +1422,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         rowTop -= rowHeight
 
         drawStatBar(contentX, rowTop, contentWidth, playerLabel, playerValue, playerHealth.currentHp.toFloat() / playerHealth.maxHp.toFloat(), playerBarColor)
+        rowTop -= rowHeight
+
+        drawStatBar(contentX, rowTop, contentWidth, launchMassLabel, launchMassValue, launchSource.mass / launchSource.initialMass, massBarColor)
         rowTop -= rowHeight
 
         drawStatBar(contentX, rowTop, contentWidth, targetLabel, targetValue, targetHealth.currentHp.toFloat() / targetHealth.maxHp.toFloat(), aiBarColor)
