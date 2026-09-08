@@ -11,7 +11,7 @@ import com.badlogic.gdx.backends.android.AndroidApplicationConfiguration;
 // plain Kotlin/JVM module with no Android involvement at all), keeping it Java sidesteps
 // that conflict entirely rather than fighting AGP 9's new Kotlin wiring for one class.
 public class AndroidLauncher extends AndroidApplication {
-    @Override
+    @Override   
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         AndroidApplicationConfiguration config = new AndroidApplicationConfiguration();

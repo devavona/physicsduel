@@ -2715,67 +2715,123 @@ above is what's actually built, and this paragraph exists so a future
 session doesn't have to re-derive that Boo saw more potential here than
 the simple version.
 
-## Aiming UX improvements - captured design notes (Sept 2026 session, not yet built)
+## Aiming UX improvements
 
-Two separate aiming complaints from on-device play, logged together since
-Boo raised them in the same message. Neither is built - "add to the list."
+Two aiming complaints from on-device play, logged together since Boo
+raised them in the same message, then both built together in a follow-up
+session once the design forks were confirmed.
 
 ### No firing below your own horizon (own planet, and the AI's own planet)
 
-Right now nothing stops a shot aimed straight down into the ground you're
-standing on - neither the player's drag nor the AI's search rules out an
-angle that immediately re-collides with the planet the shooter is
-launching from. Boo: "remove the ability to fire directly in the planet
-the player is on. same for ai. lets add some logic where you cannot fire
-if the angle is lower than the horizon from the players perspective."
+Boo: "remove the ability to fire directly in the planet the player is
+on. same for ai. lets add some logic where you cannot fire if the angle
+is lower than the horizon from the players perspective." First design
+pass: **clamp**, not silently cancel - a release (or an AI candidate)
+below horizon still fires, just leveled off to skim along it. Boo also
+asked for a visual tell: the aim line/trajectory preview should
+disappear while aimed illegally, so it *looks* wrong before you even
+let go.
 
-**Likely shape of the fix**, for whoever picks this up: the avatar stands
-at `heightAboveSurface` above `planetCenter` at `angleDegrees` - the
-radial "outward" direction at that spot is `(position - planetCenter)`
-normalized, and the local horizon is the tangent line perpendicular to
-that radial vector. A shot should only be legal when its velocity
-direction has a non-negative component along that outward radial (i.e.
-it's aimed into the "upward" half relative to where you're standing, not
-back down into your own ground). Applies twice, symmetrically:
-- **Player**: `SlingshotInputProcessor`'s fired velocity (or the live drag,
-  for earlier feedback) checked against the avatar's own radial-outward
-  vector.
-- **AI**: `AiTurnController`'s search (`searchAim`/`bestAimFor`, and the
-  `reposition` search too) should never even consider candidate angles
-  below its own horizon, not just reject the final answer after the fact
-  - same principle Phase 19e already applies to movement, just extended
-  to the legality of the aim itself.
+**Revised after first on-device test.** Boo tried it and found the
+clamp-and-fire behavior inconsistent with the hidden aim line: "if I
+move the aim so that its pointed below horizon it does indeed not show
+aim lines. however, if I release like I am shooting, it still shoots a
+projectile although at the horizon. I would like it so that if the aim
+disappears, then even if you make a shooting gesture, it will not
+fire." So for the **player**, what you see is now exactly what you get:
+an illegal raw release fires nothing at all, full stop, matching the
+hidden line. The clamp itself wasn't thrown away - it's still there as
+a hard safety net for the one case the raw check can't cover, a release
+that WAS legal but gets nudged just below horizon by `applyAimError`'s
+random jitter after the fact; that shot still fires, leveled off,
+rather than silently eating a shot the player clearly meant to take.
+The **AI** side was deliberately left as clamp-and-fire and not changed
+to match - it has no equivalent "hidden line" to stay consistent with,
+and it has to produce some shot every turn regardless (this scoping
+call hasn't been separately confirmed with Boo; flag it if the AI's
+below-horizon shots ever look wrong on-device).
 
-**Open for whoever builds it**: does an illegal (below-horizon) release
-just do nothing / read as a cancel (Boo's "cannot fire" phrasing leans
-this way), or does it clamp to skim exactly along the horizon instead of
-being silently swallowed? Not decided.
+**How it works.** Both `SlingshotInputProcessor` (player) and
+`AiTurnController` (AI) got their own private `clampAboveHorizon(origin,
+velocity)` - same logic, two copies, same reasoning as
+`applyAimError` already being duplicated between them. Local horizon =
+the tangent line perpendicular to straight-out-from-`planetCenter` at
+`origin`; a velocity whose direction has a negative component along that
+outward radial gets leveled off to skim exactly along the horizon
+instead, same speed, keeping whichever side (left/right) the illegal
+direction was leaning toward rather than snapping to one fixed side.
+- **Player**: `touchUp` checks the raw pre-jitter velocity with
+  `isBelowHorizon` right after computing it and returns early (no
+  `onFire` at all) if it's illegal - before `applyAimError` even runs.
+  `clampAboveHorizon` is still applied, but only after `applyAimError`,
+  purely as the safety net described above for jitter pushing a legal
+  aim below horizon. `currentAimBelowHorizon` exposes the same
+  `isBelowHorizon` check live, mid-drag, purely so `PlayScreen` can hide
+  the aim-line (`renderDebugOverlay`) and the real trajectory preview
+  (`renderAimTrajectoryPreview`) while it's true - so the visual tell and
+  the actual fire/no-fire decision are driven by the same check.
+- **AI**: unchanged - `clampAboveHorizon` applied inside `bestAimFor`
+  itself, the function already shared between `searchAim` (the real
+  shot) and `reposition` (scoring hypothetical positions), so both get
+  the guarantee for free from one choke point. Also re-applied in
+  `searchAim` after `applyAimError`, same hard-safety-net reasoning.
+
+### How to test on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Try dragging your aim so the shot would point back into your own
+   ground - confirm the aim line and the gray trajectory preview dots
+   both disappear while aimed that way.
+3. Release anyway while aimed illegally - confirm nothing fires at all
+   (no missile, no shot) - matching the hidden aim line exactly.
+4. Aim legally, hold near the horizon edge, and release a few times to
+   see if the jitter ever nudges a legal-looking release below horizon -
+   confirm those still fire, leveled off along the horizon, rather than
+   silently doing nothing.
+5. Watch the AI over a few turns from awkward repositioned angles and
+   confirm it never fires straight into its own ground either (it still
+   clamps-and-fires rather than skipping the shot).
+6. General feel check: does the AI's clamp ever look weirdly
+   flat/unnatural or inconsistent now that the player's side works
+   differently? Worth a call on whether the AI should match.
 
 ### A real way to aim, then decide NOT to fire
 
 Boo: "there needs to be a way for you to aim and then decide to not
-fire. maybe to reposition. now you have to release your finger in
-exactly the position of the character. there is no margin for error and
-I find its easy to shoot when you dont want to."
+fire... now you have to release your finger in exactly the position of
+the character. there is no margin for error." Explicitly ruled out a new
+button when this got revisited. Confirmed gesture: **pull back past your
+character** - the same physical motion as snapping a slingshot back
+through its own resting point instead of letting it fly.
 
-There's already a cancel escape hatch in `SlingshotInputProcessor.touchUp`
-(`if (pull.isZero(0.01f)) return true // treat a near-zero drag as
-"cancelled"`) - but 0.01 world units is a tiny, not a usable margin on
-a real touchscreen. This is functionally "you must release your finger
-exactly on the character or it fires," which is Boo's exact complaint.
+**How it works.** `SlingshotInputProcessor` tracks two flags per drag,
+both reset in `touchDown`: `pulledPastCommitDistance` latches once the
+pull first reaches `PULL_COMMIT_DISTANCE` (2 world units) - a real,
+committed aim, not touch-down jitter - and `passedBackThroughCenter`
+then latches once, after that, the pull returns within `AIM_START_RADIUS`
+(1.5, the same radius that already gates starting to aim at all - reused
+rather than adding a second meaning-adjacent constant). Once
+`passedBackThroughCenter` is true, `touchUp` always cancels, even if the
+finger is back out aiming somewhere else by the time it lifts - the
+pass-through-center is what commits to "never mind," not the final
+release position, so a legitimate full redirect that never dips back
+near the character doesn't accidentally cancel.
 
-**Open for whoever builds it** - a real design choice, not just a bigger
-number:
-- Simplest fix: just widen that deadzone radius meaningfully. Downside -
-  it eats into the low-power end of the aim range, so a genuinely weak/
-  short intentional shot could get misread as a cancel. Needs a
-  deliberately chosen radius, not an arbitrary guess.
-- Alternative: a distinct cancel gesture/zone instead of an enlarged
-  deadzone around the same release point - e.g. dragging back past the
-  starting point, or a dedicated tap-zone the way `AvatarMovementController`
-  already has dedicated zones for movement/pass-turn, so "cancel" is a
-  deliberate action rather than a fuzzy radius around "didn't drag
-  enough."
+### How to test on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Pull back to aim a real shot, then drag your finger back through/near
+   your character and release from wherever it ends up - confirm this
+   cancels (no shot fires) rather than firing whatever the final drag
+   position was.
+3. Confirm a normal single pull-and-release, with no pass back through
+   center, still fires exactly as before.
+4. Confirm the existing "release right on the character" cancel (a
+   near-zero drag) still works too - this is additive, not a replacement.
+5. Feel check: does pulling back past center feel discoverable/natural
+   without being told, or does it need a visual hint (e.g. dimming the
+   aim line once the cancel is armed)? Not built - flagging as an easy
+   follow-up if it feels too hidden.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

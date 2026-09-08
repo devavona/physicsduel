@@ -696,6 +696,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         slingshotInputProcessor = SlingshotInputProcessor(
             launchPoint = launchPoint,
+            planetCenter = launchPlanetPosition,
             viewport = viewport,
             powerScale = PULL_POWER_SCALE,
             maxSpeed = MAX_MISSILE_SPEED,
@@ -1204,10 +1205,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         shapeRenderer.begin(ShapeRenderer.ShapeType.Line)
         shapeRenderer.color = Color.CYAN
         shapeRenderer.circle(launchPoint.x, launchPoint.y, LAUNCH_MARKER_RADIUS, 16)
-        slingshotInputProcessor.currentAimLine?.let { pull ->
-            shapeRenderer.color = Color.YELLOW
-            val dragPoint = Vector2(launchPoint).add(pull)
-            shapeRenderer.line(launchPoint, dragPoint)
+        // Sept 2026 session - hidden while the shot this pull would fire
+        // points below the player's own local horizon, as a visual tell
+        // for the same restriction clampAboveHorizon enforces regardless -
+        // see SlingshotInputProcessor's "Horizon restriction" doc comment.
+        if (!slingshotInputProcessor.currentAimBelowHorizon) {
+            slingshotInputProcessor.currentAimLine?.let { pull ->
+                shapeRenderer.color = Color.YELLOW
+                val dragPoint = Vector2(launchPoint).add(pull)
+                shapeRenderer.line(launchPoint, dragPoint)
+            }
         }
         shapeRenderer.end()
     }
@@ -1229,6 +1236,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val pull = slingshotInputProcessor.currentAimLine ?: return
         if (!avatarMovementController.canFire) return
         if (pull.isZero(0.01f)) return
+        // Sept 2026 session - see renderDebugOverlay's matching check;
+        // same visual tell, same reasoning, applied to the real
+        // player-facing preview this time.
+        if (slingshotInputProcessor.currentAimBelowHorizon) return
 
         val speedTuning = shotSpeedTuning.multiplier
         val speed = minOf(pull.len() * PULL_POWER_SCALE, MAX_MISSILE_SPEED) * speedTuning

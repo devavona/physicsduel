@@ -58,6 +58,11 @@ import kotlin.math.atan2
  * the exact same gravity-aware simulation [searchAim] uses to score a
  * shot - instead of a separate, cruder straight-line heuristic, so
  * movement and aiming are finally judged by the same yardstick.
+ *
+ * **Horizon restriction (Sept 2026 session).** [clampAboveHorizon] keeps
+ * every candidate this class ever considers - and the final fired shot -
+ * from pointing back into whichever planet it's currently standing on;
+ * see that method's doc comment.
  */
 class AiTurnController(
     private val planetCenter: Vector2,
@@ -288,7 +293,12 @@ class AiTurnController(
         val (bestVelocity, bestApproach) = bestAimFor(
             origin, baseAngleRadians, target, sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
         )
-        val firedVelocity = applyAimError(bestVelocity)
+        // clampAboveHorizon again here, after applyAimError - bestVelocity
+        // is already legal (bestAimFor clamps every candidate), but the
+        // jitter's random rotation could still nudge an exactly-on-horizon
+        // shot back below it. This is the actual hard guarantee; the clamp
+        // inside bestAimFor is what keeps the search's scoring honest.
+        val firedVelocity = clampAboveHorizon(origin, applyAimError(bestVelocity))
 
         // Diagnostic - Boo's Phase 15 feedback was "if it is curving it's
         // very difficult to tell" from watching the missile alone; this
@@ -353,7 +363,14 @@ class AiTurnController(
         effectiveAimSpeed: Float,
         effectiveSimMaxSeconds: Float
     ): Pair<Vector2, Float> {
-        var bestVelocity = Vector2(target).sub(origin).nor().scl(effectiveAimSpeed)
+        // Sept 2026 session - clampAboveHorizon applied to every single
+        // candidate this function ever considers (the straight-line
+        // default below AND every swept candidate in the loop) - see that
+        // method's doc comment. Single choke point, same reasoning as why
+        // this function itself is shared between searchAim and reposition
+        // in the first place: neither one can ever end up scoring or
+        // firing an illegal angle for [origin]'s own planet.
+        var bestVelocity = clampAboveHorizon(origin, Vector2(target).sub(origin).nor().scl(effectiveAimSpeed))
         var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
 
         val stepCount = (2 * aimSearch.angleSearchDegrees / aimSearch.angleStepDegrees).toInt()
@@ -362,7 +379,7 @@ class AiTurnController(
             val angleRadians = baseAngleRadians + angleOffsetDegrees * MathUtils.degreesToRadians
             val direction = Vector2(MathUtils.cos(angleRadians), MathUtils.sin(angleRadians))
             for (speedMultiplier in aimSearch.speedMultipliers) {
-                val candidateVelocity = Vector2(direction).scl(effectiveAimSpeed * speedMultiplier)
+                val candidateVelocity = clampAboveHorizon(origin, Vector2(direction).scl(effectiveAimSpeed * speedMultiplier))
                 val approach = simulateClosestApproach(origin, candidateVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
                 if (approach < bestApproach) {
                     bestApproach = approach
@@ -371,6 +388,33 @@ class AiTurnController(
             }
         }
         return bestVelocity to bestApproach
+    }
+
+    /**
+     * Sept 2026 session - Boo: "I do not want the player to ever be able
+     * to fire into their own planet as well" (matching the same
+     * restriction added to [SlingshotInputProcessor] for the player -
+     * that class has its own private copy of this exact logic, since it
+     * clamps one live drag rather than many hypothetical candidates).
+     * Leaves [velocity] untouched if it already points above [origin]'s
+     * own local horizon (the tangent line perpendicular to
+     * straight-out-from-[planetCenter] at that position); otherwise
+     * levels it off to skim exactly along that horizon, same speed,
+     * keeping whichever side (left/right along the horizon) the illegal
+     * direction was leaning toward rather than snapping to one fixed
+     * side. Applied inside [bestAimFor] itself (every candidate, for both
+     * [searchAim] and [reposition]) and again in [searchAim] after
+     * [applyAimError], since that jitter's random rotation could
+     * otherwise nudge an exactly-on-horizon shot back below it.
+     */
+    private fun clampAboveHorizon(origin: Vector2, velocity: Vector2): Vector2 {
+        val radialOutward = Vector2(origin).sub(planetCenter).nor()
+        if (velocity.dot(radialOutward) >= 0f) return velocity
+        val speed = velocity.len()
+        val tangentA = Vector2(-radialOutward.y, radialOutward.x)
+        val tangentB = Vector2(radialOutward.y, -radialOutward.x)
+        val tangent = if (velocity.dot(tangentA) >= velocity.dot(tangentB)) tangentA else tangentB
+        return tangent.nor().scl(speed)
     }
 
     /**
