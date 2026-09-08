@@ -2989,6 +2989,94 @@ up:**
   phase sequencing hasn't been explicitly confirmed with Boo the way
   the Phase 19-23 order was.
 
+## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
+
+Builds the camera/play-field prerequisite identified in the "Multi-
+character combat" design note above - implements the parts of that
+discussion that were actually buildable now (the camera system itself),
+not the parts still waiting on other undecided design (play-field size
+cap, planet placement algorithm specifics, squad composition).
+
+**What's built:**
+- **`CameraGestureController`** (new) - a 2-finger-only pinch-zoom/pan
+  `InputProcessor`. Claims nothing while only one pointer is down (falls
+  through untouched to `AvatarMovementController`'s move buttons and
+  `SlingshotInputProcessor`'s aim drag, exactly as before); starts
+  consuming touch events the instant a second pointer arrives, and every
+  drag while two are down solves for the camera position that keeps the
+  world point under the gesture's starting midpoint anchored under the
+  current midpoint at whatever the current pinch-derived zoom is - one
+  calculation handles both "the point between your fingers stays put"
+  pinch-zoom and ordinary drag-to-pan together. Registered FIRST in both
+  of `PlayScreen`'s InputMultiplexers (`fullInputProcessor` and
+  `restrictedInputProcessor` - camera control works regardless of whose
+  turn it is), since `SlingshotInputProcessor` doesn't filter events by
+  pointer index and would otherwise risk misreading a second finger as
+  continuing an in-progress aim drag.
+- **Aim gets cancelled, not corrupted, if a second finger arrives mid-
+  drag.** `SlingshotInputProcessor.cancelAim()` (new) resets `aiming`/
+  `currentAimLine`/the cancel-gesture flags, same as a fresh `touchDown`
+  would. `PlayScreen` wires `CameraGestureController`'s
+  `onGestureEngaged` callback to call it the instant a pinch/pan begins.
+  Once a pinch/pan ends, a still-resting finger does nothing further
+  until it's lifted and touched down fresh - not a seamless handoff back,
+  a deliberate simplicity/safety tradeoff worth an on-device feel-check.
+- **Camera snaps to the active avatar at each turn transition.** Boo: "
+  when it is a avatars turn, the camera should go to that specific
+  character" - not a continuous follow (doesn't chase the projectile
+  after firing, doesn't track movement mid-turn). `PlayScreen.
+  snapCameraToActiveAvatar(worldPosition)` sets `camera.position` and a
+  fixed `AVATAR_SNAP_ZOOM` framing level, called from inside the
+  deferred `giveControlToPlayer`/`startAiTurn` closures specifically
+  (not the outer `onTurnPassed`/`onTurnComplete` bodies, which can fire
+  before `shotFlightFreezeRemaining`'s freeze actually lets the handoff
+  happen - see that field's doc comment), plus once more at the end of
+  `init{}` so the very first turn starts framed too instead of on the
+  old fixed full-world view. Between snaps, pinch/pan/zoom is completely
+  free, including all through the active player's own aiming and after
+  they've fired.
+- **`resize()` no longer discards a pan on rotation.** `FitViewport`'s
+  own `update(..., centerCamera = true)` unconditionally recenters
+  `camera.position` to world-center - `PlayScreen.resize()` now stashes
+  and restores the camera position around that call, so a device
+  rotation or window resize only re-letterboxes, never silently resets
+  the view back to center.
+
+**Deliberately not built this phase** (see "Multi-character combat"
+design note above for why): the play-field-size cap, the scattered-with-
+region-quota planet placement algorithm, squad composition/AI behavior
+with multiple characters, the play-field-boundary stray-shot timer, and
+the 4-per-side stray-shot cap. This phase is camera plumbing only - the
+prerequisite those depend on, not those themselves.
+
+### How to test Phase 24 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Confirm the game still starts framed tightly on your own avatar (not
+   the old full-field view) - this is the new initial snap.
+3. During your own turn, pinch with two fingers to zoom in/out, and drag
+   with two fingers to pan around - confirm one finger alone still only
+   ever moves/aims exactly as before, never pans the camera.
+4. While one finger is actively aiming (pull-back in progress, aim line
+   visible), add a second finger and pinch/pan - confirm the aim line
+   disappears/cancels cleanly (no stuck aim, no corrupted trajectory)
+   and the camera responds to the pinch normally.
+5. Take a shot, then immediately pinch/pan away from your character
+   before the turn hands off - confirm the camera does NOT fight you or
+   snap back mid-turn, and only jumps to the AI's character once the
+   handoff actually happens (after the shot-flight freeze expires).
+6. Confirm the same snap happens in reverse once the AI's turn ends and
+   control returns to you.
+7. Rotate the device (or resize the window, if testing on an emulator)
+   mid-game after having panned away from center - confirm the view
+   re-letterboxes for the new aspect ratio but does NOT jump back to
+   world-center.
+8. General feel check: does AVATAR_SNAP_ZOOM (0.4) frame each avatar at
+   a good level - too tight, too loose? Does the pinch-zoom range
+   (0.25-2.5) let you zoom further than useful, or not far enough, given
+   the current fixed field size? Both are starting guesses, easy to
+   retune.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

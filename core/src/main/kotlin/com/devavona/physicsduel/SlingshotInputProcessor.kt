@@ -147,6 +147,24 @@ class SlingshotInputProcessor(
         return true
     }
 
+    /**
+     * Sept 2026 session - called by [PlayScreen] the instant
+     * [CameraGestureController] sees a second finger touch down, so a
+     * pinch/pan gesture starting mid-aim doesn't leave this class stuck
+     * thinking it's still aiming (that class swallows the second pointer's
+     * events outright once it engages - see its class doc comment - so
+     * without this, [touchDragged]/[touchUp] would just never hear about
+     * the aim ending, and a lingering first finger could later look like
+     * it resumed a drag it never actually continued). Same reset
+     * [touchDown] already does at the start of every fresh drag.
+     */
+    fun cancelAim() {
+        aiming = false
+        currentAimLine = null
+        pulledPastCommitDistance = false
+        passedBackThroughCenter = false
+    }
+
     override fun touchDragged(screenX: Int, screenY: Int, pointer: Int): Boolean {
         if (!aiming) return false
         viewport.unproject(touchPoint.set(screenX.toFloat(), screenY.toFloat()))

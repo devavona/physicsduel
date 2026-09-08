@@ -130,6 +130,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val WORLD_WIDTH = 9f
         private const val WORLD_HEIGHT = 16f
 
+        // Sept 2026 session - see CameraGestureController's class doc
+        // comment for MIN_ZOOM/MAX_ZOOM (the pinch-zoom range this sits
+        // inside). The zoom level snapCameraToActiveAvatar uses to frame
+        // whoever just became active - tight enough to clearly show one
+        // avatar and its planet (see PROJECT_STATE.md's camera design note
+        // for the ~1.1-1.3 world-unit avatar-to-planet-center estimate
+        // this was picked relative to), loose enough to still show a bit
+        // of surrounding space. Starting guess, tune on-device.
+        private const val AVATAR_SNAP_ZOOM = 0.4f
+
         // Scene tuning - hand-picked "game feel" numbers, not realistic ones,
         // same spirit as the orbital milestone's STAR_MASS/ORBIT_RADIUS (see
         // GravitySystem's class doc comment). All meant to be re-tuned after
@@ -369,6 +379,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var slingshotInputProcessor: SlingshotInputProcessor
     private lateinit var avatarMovementController: AvatarMovementController
     private lateinit var aiTurnController: AiTurnController
+    // Sept 2026 session - see its own class doc comment. Built right after
+    // camera/viewport below since it needs both, but its onGestureEngaged
+    // callback references slingshotInputProcessor (not constructed until
+    // later in init{}) - safe because that callback only ever fires from
+    // real touch input during play, long after init{} has fully finished.
+    private lateinit var cameraGestureController: CameraGestureController
     // Phase 16 - shared between aiTurnController's obstacle list and the
     // player's own aim preview (see renderAimTrajectoryPreview), so both
     // read the same geometry instead of two copies that could drift.
@@ -563,6 +579,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         camera = OrthographicCamera()
         viewport = FitViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)
         camera.position.set(WORLD_WIDTH / 2f, WORLD_HEIGHT / 2f, 0f)
+        cameraGestureController = CameraGestureController(
+            camera = camera,
+            viewport = viewport,
+            onGestureEngaged = { slingshotInputProcessor.cancelAim() }
+        )
 
         // Zero, not -9.8: GravitySystem is the only source of gravity - see
         // its class doc comment.
@@ -650,7 +671,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             aimErrorSpeedFraction = AI_AIM_ERROR_SPEED_FRACTION,
             onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
             onTurnComplete = {
-                val giveControlToPlayer = { Gdx.input.inputProcessor = fullInputProcessor }
+                val giveControlToPlayer = {
+                    Gdx.input.inputProcessor = fullInputProcessor
+                    snapCameraToActiveAvatar(avatarMovementController.position)
+                }
                 if (shotFlightFreezeRemaining > 0f) {
                     pendingTurnHandoff = giveControlToPlayer
                 } else {
@@ -675,7 +699,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             startAngleDegrees = AVATAR_START_ANGLE_DEGREES,
             onTurnPassed = {
                 Gdx.input.inputProcessor = restrictedInputProcessor
-                val startAiTurn = { aiTurnController.startTurn(avatarMovementController.position) }
+                val startAiTurn = {
+                    aiTurnController.startTurn(avatarMovementController.position)
+                    snapCameraToActiveAvatar(aiTurnController.position)
+                }
                 if (shotFlightFreezeRemaining > 0f) {
                     pendingTurnHandoff = startAiTurn
                 } else {
@@ -712,10 +739,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         )
         gravityDebugController = GravityDebugController(gravitySystem)
         shotSpeedDebugController = ShotSpeedDebugController(shotSpeedTuning)
+
+        // Sept 2026 session - frames the player's own avatar from the very
+        // first frame, same as every later turn-transition snap, instead of
+        // starting on the old fixed full-world view.
+        snapCameraToActiveAvatar(avatarMovementController.position)
     }
 
     override fun show() {
         fullInputProcessor = InputMultiplexer().apply {
+            // Sept 2026 session - cameraGestureController goes first and
+            // must stay first: it needs to see (and, once a second finger
+            // is down, swallow) every touch event before
+            // avatarMovementController/slingshotInputProcessor get a look,
+            // or a pinch/pan's second finger could get misread as
+            // continuing whatever the first finger was already doing - see
+            // its own class doc comment.
+            addProcessor(cameraGestureController)
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
@@ -723,11 +763,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(slingshotInputProcessor)
         }
         // Deliberately still includes BackKeyHandler (pausing should always
-        // work) and gravityDebugController/shotSpeedDebugController (both
+        // work), gravityDebugController/shotSpeedDebugController (both
         // standing debug tools, not something turn structure should ever
-        // lock out) - only the player's own movement/aiming input is left
-        // out during the AI's turn.
+        // lock out), and cameraGestureController (looking around isn't a
+        // turn action - the player can pinch/pan during the AI's turn same
+        // as their own) - only the player's own movement/aiming input is
+        // left out during the AI's turn.
         restrictedInputProcessor = InputMultiplexer().apply {
+            addProcessor(cameraGestureController)
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
@@ -971,6 +1014,24 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 add(TrailComponent(TRAIL_MAX_POINTS))
             }
         )
+    }
+
+    /**
+     * Sept 2026 session - Boo: "when it is a avatars turn, the camera
+     * should go to that specific character." Called once at each turn
+     * transition (from inside the deferred giveControlToPlayer/startAiTurn
+     * closures specifically, not the outer onTurnPassed/onTurnComplete
+     * bodies - those can fire well before the handoff they describe
+     * actually happens, see shotFlightFreezeRemaining's doc comment) and
+     * once more up front in init{} so the very first turn starts framed
+     * too. Deliberately a one-time snap, not a continuous follow - between
+     * snaps the player is free to pinch/pan/zoom anywhere via
+     * cameraGestureController, including all through their own turn's
+     * aiming and after they've fired; this does not fight that.
+     */
+    private fun snapCameraToActiveAvatar(worldPosition: Vector2) {
+        camera.position.set(worldPosition.x, worldPosition.y, 0f)
+        camera.zoom = AVATAR_SNAP_ZOOM
     }
 
     override fun render(delta: Float) {
@@ -1580,7 +1641,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     override fun resize(width: Int, height: Int) {
+        // Sept 2026 session - viewport.update(..., true) unconditionally
+        // recenters camera.position to world-center (FitViewport's own
+        // behavior, not something this project controls), which would
+        // silently discard wherever the player had pinch/panned to on
+        // every rotation/window-resize. Stash and restore it around the
+        // call so a resize only ever re-letterboxes, never resets the view.
+        val previousCameraX = camera.position.x
+        val previousCameraY = camera.position.y
         viewport.update(width, height, true)
+        camera.position.set(previousCameraX, previousCameraY, 0f)
         resizeHudCamera()
     }
 
