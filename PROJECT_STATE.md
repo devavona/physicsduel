@@ -2133,6 +2133,198 @@ on-device testing says otherwise.
 7. Same as Phase 19d: watch for any new stutter around the AI's turn,
    given the doubled simulation cost noted above.
 
+## Phase 20: random planet placement
+
+Resolves the "Planet placement" bullet in the Campaign progression ladder
+above - the star stays fixed at world center every game; the two planets
+now get a fresh random position each time instead of the old fixed
+`LAUNCH_PLANET_X = 2f` / `TARGET_PLANET_X = 7f` / `PLANETS_Y = 4f`
+constants.
+
+Boo's explicit design call, after an initial proposal that split the
+world into a left half (player) and right half (AI): he didn't want a
+fixed side assignment at all - either planet should be able to land
+anywhere, for real variety, so long as they can't spawn too close to the
+star or to each other.
+
+**How it works.** `randomPlanetPosition()` draws one random point
+anywhere in the play area (inset from the screen edges by
+`PLANET_PLACEMENT_MARGIN_X`/`_Y`, so a planet's center never lands
+crowded against the edges or the fixed corner UI), re-rolling until it's
+at least `MIN_PLANET_STAR_SEPARATION` from the star - since the star's
+position is fixed, this alone guarantees no planet can ever spawn
+overlapping or awkwardly close to it. `randomizePlanetPositions()` then
+draws one such point for each planet independently, and if the second one
+happens to land too close to the first (`MIN_PLANET_SEPARATION`), re-rolls
+just the second one until it isn't. Both are bounded by
+`PLANET_PLACEMENT_MAX_ATTEMPTS` (200) with a sane (if pathological)
+fallback if that's ever exhausted, though given how much of the play area
+satisfies both rules at once this is expected to resolve in one or two
+draws almost always.
+
+Current tuning (first pass, easy to retune - each is a single named
+constant in `PlayScreen.kt`):
+- `PLANET_PLACEMENT_MARGIN_X = 1.3f`, `PLANET_PLACEMENT_MARGIN_Y = 1.5f` -
+  edge clearance.
+- `MIN_PLANET_STAR_SEPARATION = 2.5f` - planet-to-star center distance.
+- `MIN_PLANET_SEPARATION = 4f` - planet-to-planet center distance (planet
+  diameter is 1.6, so this always leaves at least 2.4 units of genuinely
+  clear space between them, not just non-overlap).
+
+**Scope note carried over from Phase 19c/19d/19e's pattern:** there's no
+"start a new game" trigger yet (that's Phase 22's `GameOverScreen`
+wiring), so in practice "each new game" currently means "each time
+`PlayScreen` is created" - i.e., each app launch. Once Phase 22 exists,
+it'll call this same randomization again for a rematch.
+
+**Untouched by this phase, deliberately:** planet size, planet gravity
+(target planet keeps gravity, launch planet stays non-gravity, same
+Phase 11 rollout choice as before), and both avatars' fixed starting
+angle (still straight up off their own planet's surface, regardless of
+where that surface ends up) - a planet landing in an unusual spot doesn't
+change how or where its avatar spawns relative to it, just where that
+whole pairing sits in the world.
+
+### How to test Phase 20 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Relaunch the app a handful of times and confirm the planets land in
+   genuinely different spots each time - not just shuffled left/right,
+   but different heights too, sometimes closer together, sometimes
+   farther apart.
+3. Confirm neither planet ever spawns overlapping the star, touching the
+   other planet, or crowded right against a screen edge/corner button.
+4. Confirm the star itself never moves - always the same fixed spot.
+5. Play a full turn or two and confirm nothing else broke: your own
+   avatar still starts correctly on your planet, the AI's still starts
+   correctly on its planet, gravity/aiming/HUD all still track the
+   (now-different) planet positions correctly.
+6. If a layout ever feels too spread out, too cramped, or lets a planet
+   spawn somewhere that reads as unfair (e.g., very close to a screen
+   edge), tell me roughly what you saw - the three distance/margin
+   constants above are quick to retune.
+
+**Phase 20 addendum: star-in-the-flight-path bug, found on the very
+first on-device random layout.** Boo's report: "the force the ai is
+using is off... it seems to be aiming ok but the missle goes out a
+little before being dragged into sun." Screenshot showed the actual
+cause - the star had landed almost exactly on the straight line between
+the two planets this game. The two placement rules above only check each
+planet's own distance from the star; neither says anything about whether
+the *path between* the planets stays clear of it. The AI's own gravity-
+assist loop around its planet (visible in the trail, working as intended)
+still had to cross right past the star to reach the target afterward, and
+got captured there - not an AI tuning bug, a layout gap. (Also confirmed
+in the same conversation: Gravity x0.7 and Shot Speed x0.4, visible in
+the screenshot, are the real tuned defaults from earlier phases, not a
+leftover debug-dial mis-set - ruled out as a contributing factor.)
+
+Fix: `planetLayoutIsClear()` adds a third check to
+`randomizePlanetPositions()`'s re-roll loop, via a new
+`distanceFromSegment(point, a, b)` helper (distance from a point to the
+finite line segment, not the infinite line) - the star must stay at least
+`MIN_STAR_FLIGHT_PATH_CLEARANCE` (3f) from the actual segment between
+`launchPlanetPosition` and `targetPlanetPosition`, not just far from each
+endpoint individually. The old fixed layout had a full 5-unit gap between
+the star and the direct path (planets both well below it); 3f restores a
+similar reliably-clear corridor for the random version without being so
+restrictive it fights the "anywhere for variety" goal.
+
+### How to test the star-in-the-flight-path fix
+
+1. Sync Gradle, run on-device as usual.
+2. Relaunch several times and check whether the star ever visually sits
+   on or very close to the straight line between the two planets - it
+   shouldn't anymore.
+3. If you can still reproduce a shot getting dragged into the star on a
+   path that looks like it should've had a clear lane, send a screenshot
+   - `MIN_STAR_FLIGHT_PATH_CLEARANCE` is a single easy number to bump up.
+
+**AI accuracy pass addendum: AI's max shot power was capped below the
+player's.** Boo's report with a screenshot: a "straight on" AI shot that
+should've been able to power through the star's drag instead got
+noticeably dragged off course, and "it should be able to put more power
+into the shot like the player can." Root cause, confirmed straight from
+the constants: the player's slingshot can reach up to `MAX_MISSILE_SPEED`
+(15) at a full pull, but the AI's search was built around its own
+separately-tuned `AI_AIM_SPEED` (8) with a 1.3x top multiplier - a
+best-case ceiling of 10.4, about 30% below what the player could do with
+the same global Shot Speed dial applied to both. The AI never had a
+"full power" option to reach for in the first place.
+
+Fix: removed `AI_AIM_SPEED` entirely - the AI's search is now built
+directly around `MAX_MISSILE_SPEED` (the `aimSpeed` passed into
+`AiTurnController`), the same constant the player's own slingshot is
+capped at, so a full-power AI shot and a full-power player shot are now
+mathematically identical and can never drift out of sync again the way
+two separately-tuned numbers just did. `AI_AIM_SPEED_MULTIPLIERS` changed
+from `[0.7, 1, 1.3]` (relative to the old 8) to `[0.4, 0.6, 0.8, 1]`
+(relative to the new 15) - top end is exactly 1x (full power, matching
+the player's max), with three slower options still available underneath
+for whenever a more-curving, less-direct shot actually scores better.
+
+### How to test this fix
+
+1. Sync Gradle, run on-device as usual.
+2. Set up a fairly direct shot toward the AI (or wait for one naturally)
+   and check whether it now looks like it's throwing real weight behind
+   the shot when the situation calls for it, not just a soft toss that
+   gravity easily wins against.
+3. General play: the AI should still sometimes choose a slower, more
+   curved shot when that's the better tactical option - it has more
+   speed *available* now, not a mandate to always use max power.
+
+**Player shot accuracy added, matching the AI's.** Boo's testing
+feedback: "the player shooter needs some error built in, similar to the
+ai shots." `SlingshotInputProcessor` now has its own `applyAimError`,
+an exact mirror of `AiTurnController.applyAimError` (small random angle/
+speed offset, applied once right before `onFire`, never touching the aim
+itself) - wired up via new `PLAYER_AIM_ERROR_DEGREES`/
+`PLAYER_AIM_ERROR_SPEED_FRACTION` constants that start equal to the AI's
+own (`AI_AIM_ERROR_DEGREES`/`AI_AIM_ERROR_SPEED_FRACTION`) for a fair,
+symmetric baseline. Test: fire a few shots along the exact same pull each
+time and confirm they land slightly differently, the same "imperfect but
+not wild" feel the AI's shots already have.
+
+## Weapon accuracy & ammo types - captured design note (Sept 2026 session, not yet built)
+
+Boo's bigger idea, offered alongside the player-accuracy fix above:
+accuracy shouldn't be a fixed constant forever - it should start rough
+and improve over time as a real progression mechanic, and different
+weapons/ammo should carry their own accuracy-vs-impact tradeoff. His
+model, in his own words:
+
+- **Lasers:** high accuracy, but line-of-sight only - no arcing/gravity
+  curve, so a planet or the star genuinely blocks the shot rather than
+  just bending it.
+- **Missiles:** medium accuracy - today's existing gravity-curved
+  projectile, effectively the baseline case.
+- **Bombs:** low accuracy, but a larger impact area - an area-of-effect
+  hit instead of today's single-point damage.
+
+Explicitly logged, not built: sequencing decision confirmed with Boo
+directly - keep the current build order (Phase 21 planet damage visuals
+→ Phase 22 win/loss + new game → Phase 23 progression ladder) and revisit
+this afterward, rather than pausing that order to design/build this now.
+
+**Why this is a real phase of its own, not a quick add**, for whichever
+future session picks it up:
+- A persistent "accuracy improves over time" value needs to live in the
+  save file (`SaveManager`/`GameSave`, the same file the win counter from
+  the Campaign progression ladder above will use) and needs a curve
+  decided (per-win? per-shot-landed? asymptotic toward some floor, never
+  reaching zero error?).
+- A weapon-select mechanic doesn't exist yet at all - needs UI, and a
+  decision on whether the AI also gets to choose/vary weapons or stays
+  missile-only.
+- Lasers' "line-of-sight only, no gravity curve" is a genuinely different
+  flight model from the missile-only physics-projectile system
+  everything currently assumes (`TrajectorySimulator`, `AiTurnController`'s
+  whole gravity-aware search) - not a parameter tweak on the existing one.
+- Bombs' "larger impact area" needs an actual area-of-effect damage model
+  - `ProjectileContactListener` currently only ever damages whatever the
+  missile directly touches.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

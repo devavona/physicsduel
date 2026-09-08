@@ -16,6 +16,7 @@ import com.badlogic.gdx.graphics.Texture
 import com.badlogic.gdx.graphics.g2d.NinePatch
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
+import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.math.Rectangle
 import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.physics.box2d.Body
@@ -152,11 +153,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // same illustrative "4 hits to destroy" as the character target.
         private const val TARGET_PLANET_MASS = 2f
 
-        // Phase 12 - illustrative, not tuned. AI_THINK_DELAY_SECONDS is
-        // purely pacing (long enough that the turn hand-off is visible,
-        // not so long it feels sluggish); AI_AIM_SPEED is in the same
-        // range as the player's own PULL_POWER_SCALE-derived shot speeds.
-        private const val AI_AIM_SPEED = 8f
+        // Phase 12 - illustrative, not tuned. Purely pacing (long enough
+        // that the turn hand-off is visible, not so long it feels sluggish).
         private const val AI_THINK_DELAY_SECONDS = 1f
 
         // Phase 15 - gravity-aware aim search tuning, illustrative/not
@@ -165,8 +163,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // planet - see AiTurnController.searchAim's doc comment for why
         // it's centered there and not on the straight line to the target)
         // in 8-degree steps (31 angles); speedMultipliers additionally
-        // tries each of those at 0.7x/1x/1.3x AI_AIM_SPEED (3 speeds) -
-        // ~93 candidate shots total, each simulated forward for up to
+        // tries each of those at 4 speeds, as fractions of MAX_MISSILE_SPEED
+        // (see the AiTurnController constructor call below) - ~124
+        // candidate shots total, each simulated forward for up to
         // AI_TRAJECTORY_SIM_MAX_SECONDS at AI_TRAJECTORY_SIM_STEP_SECONDS
         // per step (matching PhysicsSystem.TIME_STEP so the simulated
         // path tracks the real one closely). All comfortably cheap - this
@@ -179,7 +178,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // to immediately clip the AI's own planet.
         private const val AI_AIM_ANGLE_SEARCH_DEGREES = 120f
         private const val AI_AIM_ANGLE_STEP_DEGREES = 8f
-        private val AI_AIM_SPEED_MULTIPLIERS = listOf(0.7f, 1f, 1.3f)
+        // On-device bug fix: top end is 1f (full MAX_MISSILE_SPEED), not
+        // some multiplier past it - the AI's best-case shot should match a
+        // player's max-pull shot, not exceed it. The lower three still give
+        // it real slower/more-curving options.
+        private val AI_AIM_SPEED_MULTIPLIERS = listOf(0.4f, 0.6f, 0.8f, 1f)
         private const val AI_TRAJECTORY_SIM_MAX_SECONDS = 4f
         private const val AI_TRAJECTORY_SIM_STEP_SECONDS = 1f / 60f
 
@@ -193,6 +196,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // small enough to still read as a deliberate, competent shot.
         private const val AI_AIM_ERROR_DEGREES = 4f
         private const val AI_AIM_ERROR_SPEED_FRACTION = 0.06f
+
+        // Player shot accuracy (Sept 2026 session) - Boo, explicit: the
+        // player's own shots should carry the same kind of small
+        // imprecision the AI's already do, not a pixel-perfect release.
+        // Starts equal to the AI's own tuning for a fair baseline - see
+        // SlingshotInputProcessor's "Player shot accuracy" doc paragraph.
+        // "Accuracy improves over time" / per-weapon accuracy profiles are
+        // a deliberately separate later idea, logged in PROJECT_STATE.md's
+        // "Weapon accuracy & ammo types" design note, not this constant.
+        private const val PLAYER_AIM_ERROR_DEGREES = AI_AIM_ERROR_DEGREES
+        private const val PLAYER_AIM_ERROR_SPEED_FRACTION = AI_AIM_ERROR_SPEED_FRACTION
 
         // Visual polish, not a new mechanic - see TrailComponent's doc
         // comment. 90 points at one recorded per render frame is ~1.5
@@ -232,15 +246,45 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val CATEGORY_PLAYER_AVATAR: Short = 0x0002
         private const val CATEGORY_AI_TARGET: Short = 0x0004
 
-        // Launch/target planets sit at the same height, star above and
-        // between them - a straight-line shot passes well below the star, so
-        // using its pull to curve a shot up and over is a real aiming
-        // choice, not the only way to reach the target.
-        private const val LAUNCH_PLANET_X = 2f
-        private const val TARGET_PLANET_X = 7f
-        private const val PLANETS_Y = 4f
-        private const val STAR_X = (LAUNCH_PLANET_X + TARGET_PLANET_X) / 2f
+        // Phase 20: the star stays fixed dead center of the world every
+        // game (Boo, explicit: "the star stays centered") - only the two
+        // planets' positions are randomized now, see [randomizePlanetPositions].
+        private const val STAR_X = WORLD_WIDTH / 2f
         private const val STAR_Y = 9f
+
+        // Phase 20 planet placement constraints. Boo, explicit: planets can
+        // land anywhere for variety (not pinned to "player's always left of
+        // the star, AI's always right"), so long as they can't spawn too
+        // close to the star or to each other. PLANET_PLACEMENT_MARGIN_X/Y
+        // keep a planet's center away from the screen edges (and the fixed
+        // corner UI); MIN_PLANET_STAR_SEPARATION keeps a planet clear of the
+        // star; MIN_PLANET_SEPARATION (checked pairwise, with a re-roll if
+        // violated - see [randomizePlanetPositions]) keeps real empty space
+        // between the two planets, not just non-overlap (2 * PLANET_RADIUS =
+        // 1.6, so 4f leaves at least 2.4 units of clear space even in the
+        // closest allowed roll).
+        private const val PLANET_PLACEMENT_MARGIN_X = 1.3f
+        private const val PLANET_PLACEMENT_MARGIN_Y = 1.5f
+        private const val MIN_PLANET_STAR_SEPARATION = 2.5f
+        private const val MIN_PLANET_SEPARATION = 4f
+        private const val PLANET_PLACEMENT_MAX_ATTEMPTS = 200
+
+        // On-device bug, first random layout to actually hit it: the two
+        // checks above only look at each planet's OWN distance from the
+        // star, never whether the straight line *between* the planets
+        // passes close to it - so a roll could (and did) put the star
+        // almost exactly on the direct path between them. The AI's shot
+        // then had no way to reach the target without grazing the star,
+        // got dragged in mid-flight, and looked to Boo like "the AI's
+        // force is off" when the real problem was the layout leaving no
+        // safe shot available at all. The old fixed layout never had this
+        // problem - planets were always well below the star, so a direct
+        // shot passed 5 world-units clear of it (see the removed
+        // LAUNCH_PLANET_X/TARGET_PLANET_X/PLANETS_Y comment). This
+        // constant restores a similar (if less extreme, since full 2D
+        // variety is the whole point) minimum clearance for the random
+        // version - see [randomizePlanetPositions]/[distanceFromSegment].
+        private const val MIN_STAR_FLIGHT_PATH_CLEARANCE = 3f
 
         // How far above the launch planet's surface the fixed launch point
         // sits - needs at least MISSILE_RADIUS of clearance so a freshly
@@ -340,6 +384,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var projectileContactListener: ProjectileContactListener
     private lateinit var launchPoint: Vector2
     private lateinit var gravitySystem: GravitySystem
+
+    // Phase 20: randomized once per [init] by [randomizePlanetPositions] -
+    // replaces the old fixed LAUNCH_PLANET_X/TARGET_PLANET_X/PLANETS_Y
+    // constants. Everything that used to reference those now reads these
+    // instead (star creation, planet bodies, AI/avatar planetCenter,
+    // rendering).
+    private lateinit var launchPlanetPosition: Vector2
+    private lateinit var targetPlanetPosition: Vector2
     private lateinit var gravityDebugController: GravityDebugController
     // Phase 17 - shotSpeedTuning is the live-adjustable value itself
     // (read by SlingshotInputProcessor, aiTurnController, and the aim
@@ -454,6 +506,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     init {
         Box2D.init()
+        randomizePlanetPositions()
 
         camera = OrthographicCamera()
         viewport = FitViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)
@@ -492,9 +545,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // once to just one - see PROJECT_STATE.md's "Phase 11" entry. Every
         // celestial body is confirmed to eventually exert gravity, this is
         // just an incremental rollout, not a final design line.
-        createPlanet(LAUNCH_PLANET_X, PLANETS_Y)
+        createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)
         targetPlanetEntity = Entity().apply {
-            add(PhysicsBodyComponent(createPlanet(TARGET_PLANET_X, PLANETS_Y)))
+            add(PhysicsBodyComponent(createPlanet(targetPlanetPosition.x, targetPlanetPosition.y)))
             add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
         }
         engine.addEntity(targetPlanetEntity)
@@ -509,19 +562,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // here, a known minor gap, not addressed this phase.
         celestialObstacles = listOf(
             AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
-            AiTurnController.Obstacle(Vector2(LAUNCH_PLANET_X, PLANETS_Y), PLANET_RADIUS),
-            AiTurnController.Obstacle(Vector2(TARGET_PLANET_X, PLANETS_Y), PLANET_RADIUS)
+            AiTurnController.Obstacle(Vector2(launchPlanetPosition), PLANET_RADIUS),
+            AiTurnController.Obstacle(Vector2(targetPlanetPosition), PLANET_RADIUS)
         )
         trajectorySimulator = TrajectorySimulator(GravitySystem.G, GravitySystem.MIN_DISTANCE)
 
         aiTurnController = AiTurnController(
-            planetCenter = Vector2(TARGET_PLANET_X, PLANETS_Y),
+            planetCenter = Vector2(targetPlanetPosition),
             planetRadius = PLANET_RADIUS,
             heightAboveSurface = LAUNCH_POINT_CLEARANCE,
             stepsPerPhase = AI_MOVEMENT_STEPS_PER_PHASE,
             stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
             startAngleDegrees = AI_START_ANGLE_DEGREES,
-            aimSpeed = AI_AIM_SPEED,
+            aimSpeed = MAX_MISSILE_SPEED,
             thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
             obstacles = celestialObstacles,
             aimSearch = AiTurnController.AimSearchConfig(
@@ -550,7 +603,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         engine.addEntity(targetCharacterEntity)
 
         avatarMovementController = AvatarMovementController(
-            planetCenter = Vector2(LAUNCH_PLANET_X, PLANETS_Y),
+            planetCenter = Vector2(launchPlanetPosition),
             planetRadius = PLANET_RADIUS,
             heightAboveSurface = LAUNCH_POINT_CLEARANCE,
             stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
@@ -578,6 +631,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             powerScale = PULL_POWER_SCALE,
             maxSpeed = MAX_MISSILE_SPEED,
             speedMultiplier = { shotSpeedTuning.multiplier },
+            aimErrorDegrees = PLAYER_AIM_ERROR_DEGREES,
+            aimErrorSpeedFraction = PLAYER_AIM_ERROR_SPEED_FRACTION,
             onFire = { velocity ->
                 if (avatarMovementController.canFire) {
                     fireMissile(launchPoint, velocity, excludeCategory = CATEGORY_PLAYER_AVATAR)
@@ -643,6 +698,81 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         body.createFixture(shape, 0f) // density is meaningless on a static body - mass comes from GravitySourceComponent instead
         shape.dispose() // shapes are native-backed; always dispose after the fixture is built
         return body
+    }
+
+    /**
+     * Phase 20: picks fresh [launchPlanetPosition]/[targetPlanetPosition]
+     * for this game. Boo, explicit: planets can land anywhere for variety
+     * - not pinned to opposite sides of the star - so each is drawn
+     * independently from anywhere in the margin-inset play area (see
+     * [randomPlanetPosition], which already keeps a single planet clear of
+     * the star). The only extra rule enforced here is pairwise: if the
+     * second draw happens to land too close to the first
+     * ([MIN_PLANET_SEPARATION]), it's simply re-rolled (itself still
+     * subject to the same star-clearance rule) until it isn't, up to
+     * [PLANET_PLACEMENT_MAX_ATTEMPTS] tries - given how much of the play
+     * area satisfies both rules at once, this is expected to succeed on
+     * the first or second attempt almost always.
+     */
+    private fun randomizePlanetPositions() {
+        launchPlanetPosition = randomPlanetPosition()
+        targetPlanetPosition = randomPlanetPosition()
+        var attempts = 0
+        while (!planetLayoutIsClear() && attempts < PLANET_PLACEMENT_MAX_ATTEMPTS) {
+            targetPlanetPosition = randomPlanetPosition()
+            attempts++
+        }
+    }
+
+    /**
+     * True once the current [launchPlanetPosition]/[targetPlanetPosition]
+     * pair satisfies both layout rules: the planets aren't too close to
+     * each other, and - the bug this method was added to fix - the star
+     * isn't sitting too close to the direct path between them (checked
+     * against the actual line *segment*, via [distanceFromSegment], not
+     * the infinite line - the star being far off to the side of where the
+     * segment happens to extend to doesn't count as "in the way").
+     */
+    private fun planetLayoutIsClear(): Boolean {
+        if (targetPlanetPosition.dst(launchPlanetPosition) < MIN_PLANET_SEPARATION) return false
+        val starDistanceFromPath = distanceFromSegment(
+            Vector2(STAR_X, STAR_Y), launchPlanetPosition, targetPlanetPosition
+        )
+        return starDistanceFromPath >= MIN_STAR_FLIGHT_PATH_CLEARANCE
+    }
+
+    /** Shortest distance from [point] to the finite line segment [a]-[b] (not the infinite line each defines). */
+    private fun distanceFromSegment(point: Vector2, a: Vector2, b: Vector2): Float {
+        val segmentX = b.x - a.x
+        val segmentY = b.y - a.y
+        val lengthSquared = segmentX * segmentX + segmentY * segmentY
+        if (lengthSquared <= 0.0001f) return point.dst(a)
+        val t = (((point.x - a.x) * segmentX + (point.y - a.y) * segmentY) / lengthSquared).coerceIn(0f, 1f)
+        return point.dst(a.x + t * segmentX, a.y + t * segmentY)
+    }
+
+    /**
+     * One random point for a single planet: anywhere in the play area
+     * inset by [PLANET_PLACEMENT_MARGIN_X]/[PLANET_PLACEMENT_MARGIN_Y] from
+     * the screen edges, re-rolled until it's at least
+     * [MIN_PLANET_STAR_SEPARATION] from the star - the star's fixed
+     * position means this alone is enough to guarantee no planet ever
+     * spawns overlapping or awkwardly close to it, independent of the
+     * pairwise planet-to-planet check [randomizePlanetPositions] does on
+     * top of this.
+     */
+    private fun randomPlanetPosition(): Vector2 {
+        repeat(PLANET_PLACEMENT_MAX_ATTEMPTS) {
+            val candidate = Vector2(
+                MathUtils.random(PLANET_PLACEMENT_MARGIN_X, WORLD_WIDTH - PLANET_PLACEMENT_MARGIN_X),
+                MathUtils.random(PLANET_PLACEMENT_MARGIN_Y, WORLD_HEIGHT - PLANET_PLACEMENT_MARGIN_Y)
+            )
+            if (candidate.dst(STAR_X, STAR_Y) >= MIN_PLANET_STAR_SEPARATION) return candidate
+        }
+        // Pathological fallback - shouldn't be reachable given the margins/
+        // separations above leave most of the play area valid, but returns
+        // something sane rather than crashing if it ever is.
+        return Vector2(PLANET_PLACEMENT_MARGIN_X, PLANET_PLACEMENT_MARGIN_Y)
     }
 
     /**
@@ -871,8 +1001,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val starDiameter = STAR_RADIUS * 2f
         worldBatch.draw(starTexture, STAR_X - STAR_RADIUS, STAR_Y - STAR_RADIUS, starDiameter, starDiameter)
         val planetDiameter = PLANET_RADIUS * 2f
-        worldBatch.draw(planetLaunchTexture, LAUNCH_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
-        worldBatch.draw(planetTargetTexture, TARGET_PLANET_X - PLANET_RADIUS, PLANETS_Y - PLANET_RADIUS, planetDiameter, planetDiameter)
+        worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+        worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
         worldBatch.end()
     }
 

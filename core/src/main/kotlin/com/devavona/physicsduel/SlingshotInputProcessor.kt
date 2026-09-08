@@ -1,6 +1,7 @@
 package com.devavona.physicsduel
 
 import com.badlogic.gdx.InputAdapter
+import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.utils.viewport.Viewport
 
@@ -21,6 +22,21 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * exposes the live pull vector (null when not aiming) purely for
  * [PlayScreen] to draw a debug aiming line - this class has no rendering
  * code of its own.
+ *
+ * **Player shot accuracy (Sept 2026 session).** Boo, after the AI's own
+ * aim-error jitter ([AiTurnController.applyAimError]) had already made
+ * ITS shots imperfect: the player's own release should carry the same
+ * kind of small, deliberate imprecision, not a pixel-perfect execution of
+ * whatever the pull vector says. [applyAimError] mirrors
+ * [AiTurnController.applyAimError] exactly - same small random angle/
+ * speed offset, applied once, right before firing, never touching the
+ * aim itself. [aimErrorDegrees]/[aimErrorSpeedFraction] start equal to
+ * the AI's own tuning values for a fair, symmetric baseline; Boo's bigger
+ * idea - accuracy improving over time, and different weapon types
+ * carrying their own accuracy profile (see PROJECT_STATE.md's "Weapon
+ * accuracy & ammo types" design note) - is a deliberate later phase, not
+ * this one. This is just "the player's shots are imperfect too, by the
+ * same fixed amount the AI's are."
  */
 class SlingshotInputProcessor(
     private val launchPoint: Vector2,
@@ -28,6 +44,11 @@ class SlingshotInputProcessor(
     private val powerScale: Float,
     private val maxSpeed: Float,
     private val speedMultiplier: () -> Float,
+    // See the class doc comment's "Player shot accuracy" paragraph. A
+    // `<= 0f` value for either disables that part of the jitter entirely,
+    // same escape hatch AiTurnController.applyAimError has.
+    private val aimErrorDegrees: Float,
+    private val aimErrorSpeedFraction: Float,
     private val onFire: (velocity: Vector2) -> Unit
 ) : InputAdapter() {
 
@@ -71,7 +92,15 @@ class SlingshotInputProcessor(
 
         val speed = minOf(pull.len() * powerScale, maxSpeed) * speedMultiplier()
         val velocity = pull.nor().scl(-speed) // opposite the drag direction
-        onFire(velocity)
+        onFire(applyAimError(velocity))
         return true
+    }
+
+    /** Mirrors [AiTurnController.applyAimError] - see this class's doc comment's "Player shot accuracy" paragraph. */
+    private fun applyAimError(velocity: Vector2): Vector2 {
+        if (aimErrorDegrees <= 0f && aimErrorSpeedFraction <= 0f) return velocity
+        val angleErrorRadians = MathUtils.random(-aimErrorDegrees, aimErrorDegrees) * MathUtils.degreesToRadians
+        val speedErrorFactor = 1f + MathUtils.random(-aimErrorSpeedFraction, aimErrorSpeedFraction)
+        return Vector2(velocity).rotateRad(angleErrorRadians).scl(speedErrorFactor)
     }
 }
