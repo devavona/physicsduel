@@ -25,14 +25,20 @@ package com.devavona.physicsduel
  * - v2: added `appLaunchCount`. Purely additive - an old v1 save simply
  *   doesn't have this field, so it comes back at its Kotlin default (0)
  *   when a v1 file is read on a v2 build, rather than being discarded.
+ * - v3 (Phase 23): added `winCount` - the Campaign progression ladder's
+ *   persistent, win-only counter (see PROJECT_STATE.md's "Campaign
+ *   progression ladder" entry - never decremented or reset by a loss,
+ *   deliberately not a roguelite streak). Purely additive, same as v2.
  */
 class GameSave {
     var schemaVersion: Int = CURRENT_SCHEMA_VERSION
     var runCount: Int = 0
     /** How many times the app has been cold-started - see [PhysicsDuelGame.create]. */
     var appLaunchCount: Int = 0
+    /** Wins only - see [SaveManager.recordWin] and this class's v3 schema-history note. */
+    var winCount: Int = 0
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 2
+        const val CURRENT_SCHEMA_VERSION = 3
     }
 }

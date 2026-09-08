@@ -161,6 +161,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // symmetric fight.
         private const val LAUNCH_PLANET_MASS = TARGET_PLANET_MASS
 
+        // Sept 2026 session - Boo, on-device: could start moving to dodge
+        // the AI's shot while it was still in flight, because the AI->player
+        // input handoff happened essentially the instant the AI fired (its
+        // own post-shot reposition is synchronous, not animated, so there
+        // was no real gap between "missile leaves" and "player has full
+        // control again"). Flat freeze on BOTH directions of turn handoff
+        // for now - "I do not want either player to be able to move for 3
+        // seconds after the enemy has taken a shot." A more interesting
+        // version of this mechanic (Boo flagged it, not yet designed) is
+        // captured as a design note in PROJECT_STATE.md.
+        private const val SHOT_FLIGHT_FREEZE_SECONDS = 3f
+
         // Phase 12 - illustrative, not tuned. Purely pacing (long enough
         // that the turn hand-off is visible, not so long it feels sluggish).
         private const val AI_THINK_DELAY_SECONDS = 1f
@@ -374,6 +386,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var avatarBody: Body
     private lateinit var avatarEntity: Entity
     private lateinit var targetCharacterEntity: Entity
+
+    // Sept 2026 session - see SHOT_FLIGHT_FREEZE_SECONDS's doc comment.
+    // Ticks down from that value the instant fireMissile() spawns anything,
+    // for either side. While positive, neither turn-handoff callback below
+    // (AvatarMovementController's onTurnPassed, AiTurnController's
+    // onTurnComplete) performs its handoff immediately - each instead
+    // stashes the action it would have run in pendingTurnHandoff, and
+    // render() below fires it the instant the freeze expires. Deliberately
+    // does NOT touch either side's own established post-shot movement
+    // (AvatarMovementController.Phase.POST_SHOT, AiTurnController.fire()'s
+    // own reposition() call) - those already happen synchronously, in the
+    // same turn, before a handoff is ever attempted, so "take cover" still
+    // works exactly as before. Only ever one pending handoff at a time -
+    // by construction, nothing can trigger a second turn transition while
+    // this is still counting down.
+    private var shotFlightFreezeRemaining = 0f
+    private var pendingTurnHandoff: (() -> Unit)? = null
     // Phase 14 - Kinematic now, not Static (see avatarBody's doc comment
     // for why Kinematic is the right body type for "moves under direct
     // control, still collidable"), since aiTurnController can now
@@ -618,7 +647,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             aimErrorDegrees = AI_AIM_ERROR_DEGREES,
             aimErrorSpeedFraction = AI_AIM_ERROR_SPEED_FRACTION,
             onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
-            onTurnComplete = { Gdx.input.inputProcessor = fullInputProcessor }
+            onTurnComplete = {
+                val giveControlToPlayer = { Gdx.input.inputProcessor = fullInputProcessor }
+                if (shotFlightFreezeRemaining > 0f) {
+                    pendingTurnHandoff = giveControlToPlayer
+                } else {
+                    giveControlToPlayer()
+                }
+            }
         )
 
         targetCharacterBody = createTarget(aiTurnController.position)
@@ -636,8 +672,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
             startAngleDegrees = AVATAR_START_ANGLE_DEGREES,
             onTurnPassed = {
-                aiTurnController.startTurn(avatarMovementController.position)
                 Gdx.input.inputProcessor = restrictedInputProcessor
+                val startAiTurn = { aiTurnController.startTurn(avatarMovementController.position) }
+                if (shotFlightFreezeRemaining > 0f) {
+                    pendingTurnHandoff = startAiTurn
+                } else {
+                    startAiTurn()
+                }
             }
         )
         launchPoint = Vector2(avatarMovementController.position)
@@ -895,6 +936,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * no fixture of its own to worry about colliding with.
      */
     private fun fireMissile(origin: Vector2, velocity: Vector2, excludeCategory: Short = 0) {
+        // See SHOT_FLIGHT_FREEZE_SECONDS's doc comment - starts (or
+        // restarts) the freeze the instant anything is actually fired,
+        // regardless of which side.
+        shotFlightFreezeRemaining = SHOT_FLIGHT_FREEZE_SECONDS
+
         val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.DynamicBody
             position.set(origin)
@@ -925,6 +971,22 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     override fun render(delta: Float) {
+        // See SHOT_FLIGHT_FREEZE_SECONDS's doc comment - counts down every
+        // frame regardless of whose "turn" it nominally is, and fires
+        // whichever handoff got deferred the instant it expires. Checked
+        // first, before anything else this frame, so a handoff that fires
+        // this frame (e.g. AiTurnController.startTurn's own synchronous
+        // reposition) is reflected in the rest of this same frame's update/
+        // render, not one frame late.
+        if (shotFlightFreezeRemaining > 0f) {
+            shotFlightFreezeRemaining -= delta
+            if (shotFlightFreezeRemaining <= 0f) {
+                shotFlightFreezeRemaining = 0f
+                pendingTurnHandoff?.invoke()
+                pendingTurnHandoff = null
+            }
+        }
+
         // Phase 9: the avatar can move between frames (movement-button taps
         // handled by avatarMovementController), so launchPoint - a shared
         // Vector2 instance SlingshotInputProcessor and the debug overlay
@@ -965,6 +1027,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         if (targetHealth.isDefeated) {
             SaveManager.recordRunEnded()
+            SaveManager.recordWin() // Phase 23 - the win-only progression counter, see SaveManager.recordWin's doc comment
             dispose()
             game.setScreen(GameOverScreen(game, won = true))
             return
@@ -1385,7 +1448,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val labelValueGap = HudFont.scaled(16f)
         val minContentWidth = HudFont.scaled(220f)
 
-        val turnLabel = if (aiTurnController.isTurnActive) {
+        // shotFlightFreezeRemaining checked first: AiTurnController.isTurnActive
+        // already goes false the instant the AI fires (before its own
+        // onTurnComplete callback even runs - see AiTurnController.fire()),
+        // and AvatarMovementController's own phase/stepsRemaining already
+        // reset for the player's next turn the instant THEY pass (see
+        // AvatarMovementController.passTurn()) - so without this check
+        // first, the HUD would claim it's someone's turn to act during the
+        // exact window neither side actually can.
+        val turnLabel = if (shotFlightFreezeRemaining > 0f) {
+            "Turn ${avatarMovementController.turnNumber} - Shot in flight..."
+        } else if (aiTurnController.isTurnActive) {
             "Turn ${avatarMovementController.turnNumber} - AI's turn..."
         } else {
             val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"

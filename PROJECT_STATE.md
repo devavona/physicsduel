@@ -2465,7 +2465,7 @@ behind it, and always showed the same generic "GAME OVER" text.
 (`HealthComponent.isDefeated`). Destroying a planet (`GravitySourceComponent
 .isDestroyed`) does NOT by itself end the game - Boo, explicitly: "character
 only." A defeated-planet-but-still-alive character is its own follow-up,
-see the Phase 23 design note below.
+see the "Orbital drift" design note below.
 
 **How it works.** `PlayScreen.render()` checks both `HealthComponent`s
 right after `flushRemovals` each frame - the same point damage from that
@@ -2505,7 +2505,7 @@ a loss).
    confirm nothing looks stale/leftover from the previous run (planet
    positions, HP bars, mass bars should all be fresh).
 
-## Phase 23 (future): orbital drift for a defeated-planet-but-alive character - captured design note (Sept 2026 session, not yet built)
+## Orbital drift for a defeated-planet-but-alive character - captured design note, own future phase (Sept 2026 session, not yet built)
 
 Boo's follow-up the moment win/loss scope came up: what happens to a
 character whose planet gets destroyed while they still have HP left?
@@ -2547,7 +2547,7 @@ this earned separate scope, for whichever future session picks it up:
   character stick to the surface at the point of impact (a new fixed
   angle-around-center position, effectively re-anchoring them the way
   they started), bounce, or something else? Not settled by the
-  discussion above, deliberately left for whoever scopes Phase 23 itself.
+  discussion above, deliberately left for whoever scopes this phase.
 - Needs a decision on whether this character keeps orbiting indefinitely
   (multiple turns of drift) or the drift only covers the time between
   turns, with their position "frozen" in place while waiting for their
@@ -2557,6 +2557,207 @@ this earned separate scope, for whichever future session picks it up:
   same kind of collision/clearance thinking those phases already dealt
   with for missiles, just applied to a persistent body instead of a
   one-shot simulated trajectory.
+
+## Phase 23: win-only progression counter (escalation ladder itself, still deferred)
+
+**Deliberately a narrower slice than the full "Campaign progression
+ladder" design above.** That design's escalation content (5 wins -> AI
+gets a 2nd planet/character, 20 wins -> AI's 3rd + player's 2nd, 30 wins
+-> campaign complete + reset option) needs multiple characters per side
+to actually exist, and that design's own "Not yet decided / deferred"
+bullet flags squad composition, AI behavior with more than one character,
+and turn order (interleaved vs. whole-squad-then-whole-squad) as all
+still open. Building the ladder now means hitting that wall the moment
+anyone reaches 5 wins. Boo agreed to this narrower scope on confirmation:
+just the counter itself, visible and persisting correctly, with the
+actual escalation logic left for once turn-order/squad design gets its
+own pass.
+
+**What's built:**
+- `GameSave.winCount: Int` (schema v3 - purely additive, same safe
+  migration pattern as v2's `appLaunchCount`; an old save simply doesn't
+  have the field and it comes back at its Kotlin default of 0).
+- `SaveManager.recordWin()` - deliberately separate from
+  `recordRunEnded()`, called ONLY from `PlayScreen`'s win branch (right
+  next to the existing `recordRunEnded()` call there), never from the
+  loss branch. A loss still counts as a completed run (`runCount` still
+  goes up) but never touches `winCount`, and nothing anywhere decrements
+  it - matches the "wins only, never reset by a loss... explicitly NOT a
+  roguelite streak" line from the original design above.
+- `MenuScreen` now shows "Wins: N" (`SaveManager.currentWinCount()`),
+  drawn just above the existing "Runs completed: N" line, same centered
+  style - the menu is the one persistent-between-runs screen, so it's the
+  natural place for a counter meant to survive a loss.
+
+**Still not built** (this is the next thing blocking the rest of the
+ladder, whenever it's picked up): the actual escalation content at 5/20/
+30 wins, which needs a real design pass on multi-character-per-side squad
+composition and turn order first - see the "Not yet decided / deferred"
+bullet in the Campaign progression ladder section above, still accurate.
+
+### How to test Phase 23 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. From the main menu, confirm you see a new "Wins: N" line above "Runs
+   completed: N" (starts at 0 on a fresh save, or wherever it already
+   was if you've been testing this build).
+3. Win a run (defeat the AI's character) and confirm, back at the menu,
+   "Wins:" went up by exactly 1.
+4. Lose a run and confirm "Wins:" does NOT change, while "Runs
+   completed:" still goes up as it always has.
+5. Force-close and reopen the app (or just background/foreground it) and
+   confirm the win count survives - same persistence guarantee the run
+   count already had.
+
+## Movement freeze during shot flight
+
+Boo, on-device: "once the ai has shot and the projectile is still in
+flight, I can start moving my character to get out of the way... for now
+though, I do not want either player to be able to move for 3 seconds
+after they enemy has taken a shot."
+
+**Root cause.** The AI->player input handoff happened essentially the
+instant the AI fired, not once its shot actually resolved:
+`AiTurnController.fire()` does its own post-shot `reposition()`
+synchronously (no animation, one function call) and then immediately
+calls `onTurnComplete`, which handed `Gdx.input.inputProcessor` straight
+back to `fullInputProcessor` - full movement control - while the just-
+fired missile was still simulating its real flight through
+`PhysicsSystem`/`GravitySystem`. There was never an actual gap between
+"missile leaves" and "player can dodge it."
+
+**Fix - a flat, symmetric freeze, not a "wait for the missile to
+resolve" mechanic.** `PlayScreen.SHOT_FLIGHT_FREEZE_SECONDS` (3f)
+starts counting down from `fireMissile()` - the single spawn point
+already shared by both the player's and the AI's shots - regardless of
+which side fired. While it's counting down, neither turn-handoff
+callback performs its handoff immediately:
+- **AI -> player** (`AiTurnController`'s `onTurnComplete`): normally
+  hands `fullInputProcessor` back instantly; now the callback (`Gdx.input
+  .inputProcessor = fullInputProcessor`) is stashed in
+  `pendingTurnHandoff` instead, and only actually runs once the freeze
+  expires - `render()` checks and fires it every frame.
+- **Player -> AI** (`AvatarMovementController`'s `onTurnPassed`):
+  `Gdx.input.inputProcessor = restrictedInputProcessor` still happens
+  immediately (locking the player OUT sooner is never exploitable), but
+  `aiTurnController.startTurn(...)` - which does its OWN synchronous
+  pre-shot `reposition()` the instant it's called - is what gets
+  deferred the same way. This is the "either player" half of Boo's ask:
+  the AI doesn't get to reposition for 3 seconds after the player's own
+  shot either, even though a human can't exploit that side today.
+
+**Deliberately untouched: each side's own post-shot movement.** The
+freeze only gates the HANDOFF to the other side - not the shooter's own
+turn, which is already governed separately by `AvatarMovementController`'s
+own phase/budget (or, for the AI, its own `reposition()` call inside
+`fire()`, which already runs before `onTurnComplete` is ever reached).
+The existing "move again to take cover" mechanic from the original core
+gameplay loop design is completely unaffected - a shooter can still
+reposition normally right after firing, in the same turn; it's only the
+OTHER side's very next action that's held back.
+
+**HUD fix that came with it.** `AiTurnController.isTurnActive` goes
+false the instant the AI fires (before `onTurnComplete` even runs), and
+`AvatarMovementController`'s phase/steps already reset for the player's
+next turn the instant they pass - so without checking
+`shotFlightFreezeRemaining` first, the turn-number HUD label would have
+claimed it was someone's turn to act during the exact window neither
+side actually can. It now shows "Turn N - Shot in flight..." during the
+freeze, ahead of the existing "AI's turn..." / "Pre-shot: N left" /
+"Post-shot: N left" text.
+
+### How to test on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Let the AI take a shot and immediately try tapping the movement
+   buttons while the missile is visibly still traveling - confirm they
+   do nothing until roughly 3 seconds after the shot, and the HUD reads
+   "Shot in flight..." during that window.
+3. Fire your own shot, then use your post-shot movement as normal
+   ("take cover") - confirm this still works exactly as before, with no
+   new delay on your OWN movement in the same turn.
+4. After your post-shot movement ends (budget exhausted or Pass tapped),
+   confirm there's now a beat before "AI's turn..." appears and the AI
+   actually starts moving/aiming - roughly 3 seconds from when your shot
+   left, not from when you tapped Pass.
+5. General feel check: does 3 seconds feel like the right pause, too
+   short, or too long? It's a flat illustrative number, easy to retune.
+
+**Captured for later - "an interesting advanced version."** Boo flagged,
+without specifying details yet, that there's probably a more interesting
+mechanic here than a flat freeze - logged as a marker for future
+ideation, not a design. Roughly the space it'd occupy: something that
+lets movement during an incoming shot's flight be a real, deliberate
+choice again (a genuine dodge) rather than forbidding it outright - e.g.
+a real-time reaction window, a movement action that costs something
+(steps, a cooldown, an ammo-like resource) if used reactively, or a
+partial freeze (some movement allowed, just not enough to fully evade a
+well-aimed shot). None of this is decided; the flat 3-second freeze
+above is what's actually built, and this paragraph exists so a future
+session doesn't have to re-derive that Boo saw more potential here than
+the simple version.
+
+## Aiming UX improvements - captured design notes (Sept 2026 session, not yet built)
+
+Two separate aiming complaints from on-device play, logged together since
+Boo raised them in the same message. Neither is built - "add to the list."
+
+### No firing below your own horizon (own planet, and the AI's own planet)
+
+Right now nothing stops a shot aimed straight down into the ground you're
+standing on - neither the player's drag nor the AI's search rules out an
+angle that immediately re-collides with the planet the shooter is
+launching from. Boo: "remove the ability to fire directly in the planet
+the player is on. same for ai. lets add some logic where you cannot fire
+if the angle is lower than the horizon from the players perspective."
+
+**Likely shape of the fix**, for whoever picks this up: the avatar stands
+at `heightAboveSurface` above `planetCenter` at `angleDegrees` - the
+radial "outward" direction at that spot is `(position - planetCenter)`
+normalized, and the local horizon is the tangent line perpendicular to
+that radial vector. A shot should only be legal when its velocity
+direction has a non-negative component along that outward radial (i.e.
+it's aimed into the "upward" half relative to where you're standing, not
+back down into your own ground). Applies twice, symmetrically:
+- **Player**: `SlingshotInputProcessor`'s fired velocity (or the live drag,
+  for earlier feedback) checked against the avatar's own radial-outward
+  vector.
+- **AI**: `AiTurnController`'s search (`searchAim`/`bestAimFor`, and the
+  `reposition` search too) should never even consider candidate angles
+  below its own horizon, not just reject the final answer after the fact
+  - same principle Phase 19e already applies to movement, just extended
+  to the legality of the aim itself.
+
+**Open for whoever builds it**: does an illegal (below-horizon) release
+just do nothing / read as a cancel (Boo's "cannot fire" phrasing leans
+this way), or does it clamp to skim exactly along the horizon instead of
+being silently swallowed? Not decided.
+
+### A real way to aim, then decide NOT to fire
+
+Boo: "there needs to be a way for you to aim and then decide to not
+fire. maybe to reposition. now you have to release your finger in
+exactly the position of the character. there is no margin for error and
+I find its easy to shoot when you dont want to."
+
+There's already a cancel escape hatch in `SlingshotInputProcessor.touchUp`
+(`if (pull.isZero(0.01f)) return true // treat a near-zero drag as
+"cancelled"`) - but 0.01 world units is a tiny, not a usable margin on
+a real touchscreen. This is functionally "you must release your finger
+exactly on the character or it fires," which is Boo's exact complaint.
+
+**Open for whoever builds it** - a real design choice, not just a bigger
+number:
+- Simplest fix: just widen that deadzone radius meaningfully. Downside -
+  it eats into the low-power end of the aim range, so a genuinely weak/
+  short intentional shot could get misread as a cancel. Needs a
+  deliberately chosen radius, not an arbitrary guess.
+- Alternative: a distinct cancel gesture/zone instead of an enlarged
+  deadzone around the same release point - e.g. dragging back past the
+  starting point, or a dedicated tap-zone the way `AvatarMovementController`
+  already has dedicated zones for movement/pass-turn, so "cancel" is a
+  deliberate action rather than a fuzzy radius around "didn't drag
+  enough."
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

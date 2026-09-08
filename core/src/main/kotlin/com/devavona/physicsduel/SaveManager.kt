@@ -52,9 +52,24 @@ object SaveManager {
     /** Current app-launch count, loading from disk on first access. */
     fun currentAppLaunchCount(): Int = current.appLaunchCount
 
+    /** Current win count, loading from disk on first access - see [recordWin]. */
+    fun currentWinCount(): Int = current.winCount
+
     /** Call when a run genuinely ends (not on pause) - see [PauseScreen]. */
     fun recordRunEnded() {
         current.runCount += 1
+        persistTo(current, tmpFile, saveFile, backupFile)
+    }
+
+    // Phase 23 - the Campaign progression ladder's persistent counter (see
+    // PROJECT_STATE.md's "Campaign progression ladder" entry). Deliberately
+    // separate from recordRunEnded() above and called ONLY on an actual win
+    // - a loss still counts as a completed run (recordRunEnded() still
+    // fires) but never touches this counter, and nothing here ever
+    // decrements it. Callers are expected to call both when a run ends in
+    // a win - see PlayScreen's win branch.
+    fun recordWin() {
+        current.winCount += 1
         persistTo(current, tmpFile, saveFile, backupFile)
     }
 

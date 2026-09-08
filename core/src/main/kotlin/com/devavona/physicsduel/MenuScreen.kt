@@ -40,6 +40,14 @@ class MenuScreen(private val game: PhysicsDuelGame) : InputAdapter(), Screen {
         val prompt = "Tap to Play"
         font.draw(batch, prompt, (width - HudFont.widthOf(prompt)) / 2f, height * 0.5f)
 
+        // Phase 23 - the Campaign progression ladder's persistent win-only
+        // counter (see PROJECT_STATE.md's "Campaign progression ladder"
+        // entry). Drawn above the run count below, same centered style -
+        // this is the one persistent-between-runs screen, so it's the
+        // natural place for a counter that's meant to survive a loss.
+        val wins = "Wins: ${SaveManager.currentWinCount()}"
+        font.draw(batch, wins, (width - HudFont.widthOf(wins)) / 2f, height * 0.20f)
+
         // Phase 6 tie-in: proves persisted state (SaveManager) reaches the
         // screen, not just Logcat - the visible number should match whatever
         // was last logged as "Loaded save: runCount=N" at cold start.
