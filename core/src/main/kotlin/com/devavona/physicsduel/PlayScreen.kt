@@ -659,6 +659,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     /** Same pattern as [targetPlanetEntity], for the launch planet once it also became a real gravity source - see that field's doc comment. */
     private lateinit var launchPlanetEntity: Entity
 
+    // Sept 2026 session - direct Body references (same pattern as avatarBody/
+    // targetCharacterBody above) purely so debugRenderer's overridden
+    // renderBody can identify and skip exactly these three bodies by
+    // reference - see debugRenderer's construction in init{} for why.
+    private lateinit var starBody: Body
+    private lateinit var launchPlanetBody: Body
+    private lateinit var targetPlanetBody: Body
+
     init {
         Box2D.init()
         randomizePlanetPositions()
@@ -694,7 +702,31 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // Zero, not -9.8: GravitySystem is the only source of gravity - see
         // its class doc comment.
         world = World(Vector2(0f, 0f), true)
-        debugRenderer = Box2DDebugRenderer()
+        // Sept 2026 session - Boo: "I want to remove the green circles
+        // around the planets and sun." Box2DDebugRenderer colors every
+        // body's wireframe by Box2D body type (see its own getColorByBody) -
+        // static bodies (the star, both planets - all three permanently
+        // motionless gravity sources) draw green; that's exactly what Boo's
+        // pointing at, not the avatar/AI target (kinematic, blue) or
+        // missiles (dynamic, red/pink), which he didn't mention and this
+        // leaves untouched. All three green bodies have had real sprite art
+        // since Phase 18/26 with alignment already confirmed on-device, so
+        // there's nothing left for their wireframes to verify - exactly the
+        // "future step" Phase 18's doc comment flagged ("hiding the
+        // wireframes for just these three bodies... needs a small
+        // deliberate change, not a one-line toggle"). Box2DDebugRenderer has
+        // no built-in per-body filter, but its renderBody(Body) is
+        // `protected`, not `private` - overriding it here and returning
+        // early for exactly these three bodies (by reference, set just
+        // below/further down in this same init{} block) is that small
+        // deliberate change; everything else still falls through to
+        // super.renderBody and draws exactly as before.
+        debugRenderer = object : Box2DDebugRenderer() {
+            override fun renderBody(body: Body) {
+                if (body === starBody || body === launchPlanetBody || body === targetPlanetBody) return
+                super.renderBody(body)
+            }
+        }
         shapeRenderer = ShapeRenderer()
 
         engine = Engine()
@@ -708,10 +740,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         projectileContactListener = ProjectileContactListener(engine)
         world.setContactListener(projectileContactListener)
 
-        val star = createStar()
+        starBody = createStar()
         engine.addEntity(
             Entity().apply {
-                add(PhysicsBodyComponent(star))
+                add(PhysicsBodyComponent(starBody))
                 add(GravitySourceComponent(initialMass = STAR_MASS, isDamageable = false))
             }
         )
@@ -724,13 +756,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // any damage, and that the AI's shots looked wrong in ways that
         // make sense once you know his planet was never pulling on
         // anything - both planets now get identical treatment.
+        launchPlanetBody = createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)
         launchPlanetEntity = Entity().apply {
-            add(PhysicsBodyComponent(createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)))
+            add(PhysicsBodyComponent(launchPlanetBody))
             add(GravitySourceComponent(initialMass = LAUNCH_PLANET_MASS))
         }
         engine.addEntity(launchPlanetEntity)
+        targetPlanetBody = createPlanet(targetPlanetPosition.x, targetPlanetPosition.y)
         targetPlanetEntity = Entity().apply {
-            add(PhysicsBodyComponent(createPlanet(targetPlanetPosition.x, targetPlanetPosition.y)))
+            add(PhysicsBodyComponent(targetPlanetBody))
             add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
         }
         engine.addEntity(targetPlanetEntity)
