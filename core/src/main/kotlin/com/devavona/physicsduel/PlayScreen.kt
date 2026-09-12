@@ -287,6 +287,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // it's simulating gravity through solid ground anyway).
         private const val AIM_PREVIEW_INVALID_DOT_COUNT = 24
 
+        // Sept 2026 session - on-device screenshot showed the 24-dot cap
+        // above wasn't actually enough by itself: since obstacle-stopping
+        // is skipped for the invalid preview, the star's own gravity could
+        // fling the simulated point far across the map (looping down near
+        // the star and back) before 24 dots' worth of steps ran out -
+        // nothing like the short "clears your own planet" stub intended.
+        // Capping by real-world distance from launchPoint as well (whichever
+        // limit is hit first) keeps it a short stub regardless of how the
+        // gravity simulation happens to curve it. Boo: "3 world units is
+        // good" - roughly twice PLANET_RADIUS's diameter, enough to clearly
+        // pass beyond the planet's far edge without wandering off toward
+        // anything else in the scene.
+        private const val AIM_PREVIEW_INVALID_MAX_DISTANCE = 3f
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -480,11 +494,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // AiTurnController's onTurnComplete) performs its handoff immediately -
     // each instead stashes the action it would have run in
     // [pendingTurnHandoff], and render() fires it the instant the shot
-    // resolves. Deliberately does NOT touch either side's own established
-    // post-shot movement (AvatarMovementController.Phase.POST_SHOT,
-    // AiTurnController.fire()'s own reposition() call) - those already
-    // happen synchronously, in the same turn, before a handoff is ever
-    // attempted. Only ever one active shot/pending handoff at a time - by
+    // resolves. Only ever one active shot/pending handoff at a time - by
     // construction, nothing can trigger a second turn transition while a
     // shot is still unresolved. No failsafe timer for a shot that never
     // resolves either way (e.g. a stable orbit) - Boo, explicit: "i dont
@@ -860,14 +870,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                     aiTurnController.startTurn(avatarMovementController.position)
                     snapCameraToActiveAvatar(aiTurnController.position)
                 }
-                // Sept 2026 session - onTurnPassed only ever fires from
-                // Phase.POST_SHOT (either its step budget hitting zero or an
-                // early Pass tap - see AvatarMovementController), which only
-                // happens after onFired(), which only happens after
-                // fireMissile() already set shotResolved = false for this
-                // turn's shot - so shotResolved can be true here only if
-                // that shot already resolved (e.g. hit something) during the
-                // player's own post-shot repositioning, before they passed.
+                // Sept 2026 session - onTurnPassed now fires straight out of
+                // AvatarMovementController.onFired() (post-shot movement was
+                // removed - firing ends the turn immediately), which only
+                // happens after fireMissile() already set shotResolved =
+                // false for this turn's shot - so shotResolved can be true
+                // here only in some edge case where the shot resolved
+                // (e.g. an instant self-collision) before this callback runs.
                 if (!shotResolved) {
                     pendingTurnHandoff = startAiTurn
                 } else {
@@ -896,10 +905,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             aimErrorDegrees = PLAYER_AIM_ERROR_DEGREES,
             aimErrorSpeedFraction = PLAYER_AIM_ERROR_SPEED_FRACTION,
             onFire = { velocity ->
-                if (avatarMovementController.canFire) {
-                    fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = CATEGORY_PLAYER_AVATAR)
-                    avatarMovementController.onFired()
-                }
+                fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = CATEGORY_PLAYER_AVATAR)
+                avatarMovementController.onFired()
             }
         )
         gravityDebugController = GravityDebugController(gravitySystem)
@@ -1613,7 +1620,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      */
     private fun renderAimTrajectoryPreview() {
         val pull = slingshotInputProcessor.currentAimLine ?: return
-        if (!avatarMovementController.canFire) return
         if (pull.isZero(0.01f)) return
         val belowHorizon = slingshotInputProcessor.currentAimBelowHorizon
 
@@ -1663,15 +1669,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 if (blocked) break
             }
 
+            // Sept 2026 session - on-device screenshot showed the dot-count
+            // cap below wasn't enough by itself: with obstacle-stopping
+            // skipped, the star's gravity could fling the simulated point
+            // far across the map (looping down near the star and back)
+            // well before 24 dots' worth of steps ran out. Checked BEFORE
+            // drawing this step's dot, so a step that has already flown
+            // past the distance cap doesn't get an extra dot drawn beyond
+            // it - see AIM_PREVIEW_INVALID_MAX_DISTANCE's doc comment.
+            if (belowHorizon && position.dst(launchPoint) >= AIM_PREVIEW_INVALID_MAX_DISTANCE) break
+
             if (stepIndex % AIM_PREVIEW_DOT_INTERVAL_STEPS == 0) {
                 shapeRenderer.circle(position.x, position.y, AIM_PREVIEW_DOT_RADIUS, 8)
                 dotsDrawn++
-                // Sept 2026 session - Boo, immediately after the above:
-                // "lets not have it be full length. lets jst have it
-                // extend beyong the planet but 24 dots. just enough so the
-                // player nows its an invalid shot." Only caps the red
-                // (belowHorizon) case - the normal gray preview still runs
-                // its own obstacle-stop/full-length logic above, untouched.
+                // Sept 2026 session - Boo, immediately after making this
+                // red preview draw through obstacles: "lets not have it be
+                // full length. lets jst have it extend beyong the planet
+                // but 24 dots. just enough so the player nows its an
+                // invalid shot." Only caps the red (belowHorizon) case -
+                // the normal gray preview still runs its own obstacle-stop/
+                // full-length logic above, untouched.
                 if (belowHorizon && dotsDrawn >= AIM_PREVIEW_INVALID_DOT_COUNT) break
             }
         }
@@ -1790,31 +1807,25 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Draws [AvatarMovementController]'s move buttons (always) and its pass
-     * button (only during [AvatarMovementController.Phase.POST_SHOT], since
-     * tapping it does nothing outside that phase - see that class's
-     * touchDown), bottom corners, plus a turn/phase/steps-remaining readout
-     * above [renderHud]'s "Missile Y" line. Debug-grade UI, same spirit as
-     * [renderGravityDebugControls] - not final art.
+     * Draws [AvatarMovementController]'s move buttons, bottom-left corner,
+     * plus a turn/steps-remaining readout above [renderHud]'s "Missile Y"
+     * line. Debug-grade UI, same spirit as [renderGravityDebugControls] -
+     * not final art.
+     *
+     * Sept 2026 session - the Pass button is gone along with post-shot
+     * movement: there's nothing left to end early once firing itself ends
+     * the turn (see [AvatarMovementController]'s class doc comment).
      */
     private fun renderMovementControls() {
         val leftRect = avatarMovementController.leftButtonRect
         val rightRect = avatarMovementController.rightButtonRect
-        val showPassButton = avatarMovementController.phase == AvatarMovementController.Phase.POST_SHOT
 
         hudBatch.projectionMatrix = hudCamera.combined
         hudBatch.begin()
         buttonPatch.draw(hudBatch, leftRect.x, leftRect.y, leftRect.width, leftRect.height)
         buttonPatch.draw(hudBatch, rightRect.x, rightRect.y, rightRect.width, rightRect.height)
-        if (showPassButton) {
-            val passRect = avatarMovementController.passButtonRect
-            buttonPatch.draw(hudBatch, passRect.x, passRect.y, passRect.width, passRect.height)
-        }
         drawCenteredLabel("<", leftRect)
         drawCenteredLabel(">", rightRect)
-        if (showPassButton) {
-            drawCenteredLabel("Pass", avatarMovementController.passButtonRect)
-        }
         hudBatch.end()
     }
 
@@ -1861,9 +1872,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // shotResolved checked first: AiTurnController.isTurnActive already
         // goes false the instant the AI fires (before its own
         // onTurnComplete callback even runs - see AiTurnController.fire()),
-        // and AvatarMovementController's own phase/stepsRemaining already
-        // reset for the player's next turn the instant THEY pass (see
-        // AvatarMovementController.passTurn()) - so without this check
+        // and AvatarMovementController's own stepsRemaining already resets
+        // for the player's next turn the instant THEY fire (see
+        // AvatarMovementController.onFired()) - so without this check
         // first, the HUD would claim it's someone's turn to act during the
         // exact window neither side actually can.
         val turnLabel = if (!shotResolved) {
@@ -1871,9 +1882,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         } else if (aiTurnController.isTurnActive) {
             "Turn ${avatarMovementController.turnNumber} - AI's turn..."
         } else {
-            val phaseLabel = if (avatarMovementController.phase == AvatarMovementController.Phase.PRE_SHOT) "Pre-shot" else "Post-shot"
-            "Turn %d - %s: %d left".format(
-                avatarMovementController.turnNumber, phaseLabel, avatarMovementController.stepsRemaining
+            // Sept 2026 session - no more Pre-shot/Post-shot split (post-shot
+            // movement was removed entirely) - just one budget, spent before firing.
+            "Turn %d: %d left".format(
+                avatarMovementController.turnNumber, avatarMovementController.stepsRemaining
             )
         }
 

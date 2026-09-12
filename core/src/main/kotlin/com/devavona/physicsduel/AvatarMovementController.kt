@@ -9,24 +9,27 @@ import com.badlogic.gdx.math.Vector2
 /**
  * Phase 9's movement-budget/turn controller: the avatar walks along a fixed
  * planet's surface (an angle around the planet's center, at a constant
- * height above it) by spending steps from a budget that resets in two
- * halves per turn - see PROJECT_STATE.md's "Core gameplay loop" entry for
- * the agreed design (move to line up an angle, take one shot, move again to
- * take cover, then the turn passes). There's no AI opponent yet, so
- * [passTurn] - triggered automatically once the post-shot budget hits zero,
- * or early via a tap on [passButtonRect] - just starts a fresh turn instead
- * of handing off to anyone. This phase is about proving the movement/
- * budget/turn-boundary mechanic feels right in isolation, the same scoping
- * spirit as Phase 8's aiming-only slice.
+ * height above it) by spending steps from a per-turn budget - see
+ * PROJECT_STATE.md's "Core gameplay loop" entry for the agreed design.
  *
- * Two always-visible tap zones (bottom-left corner) step the avatar around
- * [planetCenter] by [stepAngleDegrees] per tap; a third zone, bottom-right,
- * only matters during [Phase.POST_SHOT] and lets the player end their
- * post-shot repositioning early instead of using every remaining step.
- * [PlayScreen] is expected to call [onFired] exactly once, right after a
- * missile actually launches - this class knows nothing about aiming or
- * firing itself, same separation-of-concerns as [GravityDebugController]
- * only owning gravity tuning.
+ * **Post-shot movement removed (Sept 2026 session).** This used to split
+ * each turn's budget in two - move, then fire, then a second post-shot
+ * budget to reposition/take cover before a passTurn() step (triggered by
+ * that second budget hitting zero, or an early tap on a dedicated Pass
+ * button) actually ended the turn. Boo wanted that gone entirely: "remove post-shot
+ * movement entirely - only pre-shot movement (5 paces), then firing ends
+ * the turn." There's now exactly one budget, spent before firing; [onFired]
+ * itself ends the turn immediately, no separate pass step. [AiTurnController]
+ * got the symmetric change - its own post-shot [AiTurnController.fire]
+ * repositioning call was removed too, so both sides now play by the same
+ * move-then-shoot-then-done rule.
+ *
+ * The one always-visible tap zone pair (bottom-left corner) steps the
+ * avatar around [planetCenter] by [stepAngleDegrees] per tap. [PlayScreen]
+ * is expected to call [onFired] exactly once, right after a missile
+ * actually launches - this class knows nothing about aiming or firing
+ * itself, same separation-of-concerns as [GravityDebugController] only
+ * owning gravity tuning.
  */
 class AvatarMovementController(
     private val planetCenter: Vector2,
@@ -36,14 +39,11 @@ class AvatarMovementController(
     private val stepAngleDegrees: Float,
     startAngleDegrees: Float,
     // Phase 12: lets PlayScreen hand off to the AI's turn the moment this
-    // one ends, regardless of which of the two passTurn() triggers (the
-    // post-shot budget hitting zero, or an early Pass tap) caused it.
-    // Defaults to a no-op so every earlier test/usage of this class still
-    // compiles unchanged.
+    // one ends - since Sept 2026, that's the instant [onFired] is called,
+    // not a separate passTurn() trigger. Defaults to a no-op so every
+    // earlier test/usage of this class still compiles unchanged.
     private val onTurnPassed: () -> Unit = {}
 ) : InputAdapter() {
-
-    enum class Phase { PRE_SHOT, POST_SHOT }
 
     companion object {
         private const val BUTTON_SIZE_REFERENCE_PX = 160f
@@ -65,15 +65,10 @@ class AvatarMovementController(
 
     var angleDegrees: Float = startAngleDegrees
         private set
-    var phase: Phase = Phase.PRE_SHOT
-        private set
     var stepsRemaining: Int = stepsPerPhase
         private set
     var turnNumber: Int = 1
         private set
-
-    /** True only during [Phase.PRE_SHOT] - [PlayScreen] gates firing on this so a shot can't sneak in mid post-shot repositioning. */
-    val canFire: Boolean get() = phase == Phase.PRE_SHOT
 
     /** The avatar's current world position: [heightAboveSurface] above [planetCenter]'s surface, at [angleDegrees]. */
     val position: Vector2
@@ -100,13 +95,6 @@ class AvatarMovementController(
             return Rectangle(margin + size + gap, margin, size, size)
         }
 
-    /** Bottom-right corner - only meaningful, and only drawn by [PlayScreen], during [Phase.POST_SHOT]: ends the turn early. */
-    val passButtonRect: Rectangle
-        get() {
-            val size = buttonSize
-            return Rectangle(Gdx.graphics.width - margin - size, margin, size, size)
-        }
-
     override fun touchDown(screenX: Int, screenY: Int, pointer: Int, button: Int): Boolean {
         val renderX = screenX.toFloat()
         val renderY = Gdx.graphics.height - screenY.toFloat() // touch input is top-left-origin; button rects are render-space (bottom-left-origin), same flip GravityDebugController does
@@ -114,7 +102,6 @@ class AvatarMovementController(
         return when {
             leftButtonRect.contains(renderX, renderY) -> { move(+1); true }
             rightButtonRect.contains(renderX, renderY) -> { move(-1); true }
-            phase == Phase.POST_SHOT && passButtonRect.contains(renderX, renderY) -> { passTurn(); true }
             else -> false
         }
     }
@@ -123,18 +110,16 @@ class AvatarMovementController(
         if (stepsRemaining <= 0) return
         angleDegrees += direction * stepAngleDegrees
         stepsRemaining--
-        if (phase == Phase.POST_SHOT && stepsRemaining == 0) passTurn()
     }
 
-    /** Called by [PlayScreen] right after a missile actually launches - moves from the pre-shot budget into the post-shot one. */
+    /**
+     * Called by [PlayScreen] right after a missile actually launches - ends
+     * the turn immediately (Sept 2026 session: post-shot movement removed,
+     * see class doc comment). Resets the budget and advances [turnNumber]
+     * for whoever's turn is next, then fires [onTurnPassed] the same way
+     * the old passTurn() used to.
+     */
     fun onFired() {
-        if (phase != Phase.PRE_SHOT) return
-        phase = Phase.POST_SHOT
-        stepsRemaining = stepsPerPhase
-    }
-
-    private fun passTurn() {
-        phase = Phase.PRE_SHOT
         stepsRemaining = stepsPerPhase
         turnNumber++
         onTurnPassed()

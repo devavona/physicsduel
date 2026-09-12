@@ -233,14 +233,13 @@ class AiTurnController(
         val origin = position
         val velocity = searchAim(origin, targetPosition)
         onFire(origin, velocity)
-        // Post-shot movement, mirroring the player's own pre-shot/post-shot
-        // split (AvatarMovementController.Phase) - one more repositioning
-        // pass toward the same ideal firing angle, using the turn's
-        // movement budget a second time, before the turn actually ends.
-        // Not a distinct "take cover" heuristic (nothing scores defensive
-        // position yet) - just a second chance to close the gap toward
-        // [reposition]'s target, same goal as the pre-shot move.
-        reposition(targetPosition)
+        // Sept 2026 session - used to reposition() a second time here (a
+        // "post-shot" move mirroring the player's own pre-shot/post-shot
+        // split), but that split was removed entirely: Boo wanted a turn to
+        // be move up to stepsPerPhase steps, then fire, then the turn's
+        // over - full stop, symmetric for both sides. Firing now ends the
+        // AI's turn immediately, same as AvatarMovementController.onFired()
+        // does for the player.
         active = false
         onTurnComplete()
     }

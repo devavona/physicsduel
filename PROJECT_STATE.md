@@ -3437,27 +3437,99 @@ right after seeing that on-device: "lets not have it be full length.
 lets jst have it extend beyong the planet but 24 dots. just enough so
 the player nows its an invalid shot."
 
-**Final behavior:** the obstacle-stop skip stays (the red preview still
-draws straight through any celestial body rather than stopping at the
-first one), but it's now additionally capped at a fixed
-`AIM_PREVIEW_INVALID_DOT_COUNT` (24) dots regardless of
-`effectiveMaxSeconds` - a short, fixed-length red stub that clears the
-shooter's own planet and reads as "pointing here, and it's invalid,"
-not a full trajectory projection (which wouldn't mean anything anyway
-once it's simulating gravity through solid ground). The legal (gray)
-preview is untouched by any of this - still obstacle-stopped, still
-runs the full `effectiveMaxSeconds` when nothing blocks it.
+**Second fix (also insufficient on its own):** additionally capped at a
+fixed `AIM_PREVIEW_INVALID_DOT_COUNT` (24) dots regardless of
+`effectiveMaxSeconds`. On-device screenshot showed this still wasn't
+enough by itself: with obstacle-stopping skipped, the star's own
+gravity could fling the simulated point far across the map - looping
+down near the star and back - well before 24 dots' worth of simulated
+steps ran out, since a dot count alone doesn't bound how far apart those
+steps can land in world-space.
+
+**Final behavior:** a second, distance-based cap -
+`AIM_PREVIEW_INVALID_MAX_DISTANCE` (3f world units, Boo: "3 world units
+is good" - roughly twice the planet's diameter) - stops the simulation
+the instant the point is that far from `launchPoint`, checked every step
+BEFORE the dot-count check so whichever limit is hit first wins. Between
+the two caps, the red preview is now reliably a short stub that clears
+the shooter's own planet and stops, regardless of how the gravity
+simulation happens to curve it - never a long wandering loop toward
+something else in the scene. The legal (gray) preview is untouched by
+any of this - still obstacle-stopped, still runs the full
+`effectiveMaxSeconds` when nothing blocks it.
 
 #### How to test the Phase 27 addendum on-device
 
 1. Sync Gradle, run on-device as usual.
-2. Aim below your own horizon - confirm the red dots now extend a short,
-   clearly-visible stub (about 24 dots, passing through your own planet
-   if that's the pointed direction) rather than stopping almost
-   immediately, and rather than running the full length of a normal
-   preview.
-3. Aim in a normal, legal direction - confirm the gray preview's length/
+2. Aim below your own horizon - confirm the red dots now form a short,
+   contained stub that clears your own planet and stops (roughly 3
+   world-units' worth, or 24 dots, whichever comes first) - NOT a long
+   loop wandering toward the star or elsewhere in the scene.
+3. Try this near different parts of the scene/at different pull
+   strengths - confirm the red stub stays similarly short and contained
+   every time, not just in the one layout already tested.
+4. Aim in a normal, legal direction - confirm the gray preview's length/
    obstacle-stop behavior is unchanged from before this addendum.
+
+## Phase 28: post-shot movement removed entirely - firing ends the turn
+
+The last of the four items from Boo's original punch list (camera
+abruptness, planet graphics, aim-line visibility, and this one). Boo,
+explicit: "remove post-shot movement entirely - only pre-shot movement
+(5 paces), then firing ends the turn." Since Phase 9, every turn had
+been split into two movement budgets - move up to `stepsPerPhase` steps,
+fire, then move again (take cover) before the turn actually passed,
+either automatically once that second budget hit zero or early via a
+dedicated Pass button. That second half is gone: a turn is now move
+(up to `stepsPerPhase` steps) then fire, full stop.
+
+**Symmetric for the AI too.** `AiTurnController.fire()` used to make its
+own second `reposition()` call after firing, mirroring the player's
+post-shot phase - asked and confirmed with Boo ("Yes, remove it too")
+before touching it, so both sides now play by the exact same
+move-then-shoot-then-done rule.
+
+**What changed:**
+
+- `AvatarMovementController`: removed the `Phase` enum (`PRE_SHOT`/
+  `POST_SHOT`), the `phase` field, `passButtonRect`, and the
+  `touchDown`/`move()` logic that triggered a Pass. There's now a single
+  `stepsRemaining` budget. `onFired()` - still called by `PlayScreen`
+  the instant a missile actually launches - now does what the old
+  `passTurn()` used to: resets the budget, advances `turnNumber`, and
+  fires `onTurnPassed()` immediately, ending the turn right there.
+- `AiTurnController.fire()`: removed the second `reposition(targetPosition)`
+  call after `onFire(...)` - the AI's turn now ends immediately after it
+  fires, same as the player's.
+- `PlayScreen`: `renderMovementControls()` no longer draws a Pass button
+  (nothing left for it to do early). `renderStatsPanel()`'s turn label
+  lost the "Pre-shot"/"Post-shot" distinction - just `"Turn N: X left"`
+  now. The `SlingshotInputProcessor.onFire` wiring and
+  `renderAimTrajectoryPreview()` no longer gate on `canFire` (that
+  property's whole reason to exist - blocking a shot during post-shot
+  repositioning - no longer applies), since `AvatarMovementController`
+  switches away the input processor synchronously the instant a shot
+  fires, before another touch event could ever reach the slingshot.
+- The existing shot-resolution/turn-handoff machinery from Phase 25
+  (`shotResolved`, `pendingTurnHandoff`, stray shots, eased camera snap)
+  is untouched - `onFired()`/`fire()` ending the turn immediately still
+  goes through the same deferred-handoff path if the just-fired shot
+  hasn't resolved yet.
+
+#### How to test Phase 28 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Take your pre-shot movement steps (up to 5), then fire - confirm the
+   turn ends right away (no post-shot movement window, no Pass button
+   ever appears) and control hands to the AI once the shot resolves,
+   same as before.
+3. Confirm the turn/steps HUD readout now just reads "Turn N: X left"
+   with no Pre-shot/Post-shot label.
+4. Watch a few AI turns - confirm the AI also stops moving the instant
+   it fires, with no extra repositioning hop afterward.
+5. Play several turns each way - confirm nothing regressed from Phase
+   25's stray-shot/camera-ease behavior (shots still resolve, camera
+   still eases to whoever's turn is next).
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
