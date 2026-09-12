@@ -3139,6 +3139,121 @@ fixing before this phase is really done:
     stars over a 3x-wider area) look right, or too sparse/too busy?
     All still starting guesses, easy to retune further.
 
+## Phase 25: turn ends on shot resolution + persistent stray shots + eased camera snap
+
+Picks up two items straight from Phase 24's "deliberately not built"
+list, plus a fresh complaint about the snap itself. Boo, testing Phase
+24's hard camera snap: "the abruptness. and you cant see your shot an
+dfollow it to completion or it flying out of the play field." Rather
+than building a narrower fix, this directly builds out the "Multi-
+character combat" design note's stray-shot lifecycle (turn-ending
+trigger + persistence + damage + the 4-per-side/8-total cap) that Phase
+24 had explicitly deferred - Boo confirmed the full scope after being
+walked through the tradeoff: "are you sayin that if I have the turn
+terminate that I have to sacrifice the shot that can possibly return
+later?" / "yes" (build the full thing, no shortcuts).
+
+**What's built:**
+- **The turn no longer hands off on a flat timer.** The old
+  `SHOT_FLIGHT_FREEZE_SECONDS` (a fixed 5-second freeze after every shot,
+  regardless of what happened to it) is gone entirely. Instead,
+  `PlayScreen` tracks whichever shot was just fired (`activeShotEntity`/
+  `activeShotSide`, plus `shotResolved` - false the instant it's fired)
+  and only allows the pending turn-handoff (`pendingTurnHandoff`, same
+  deferred-closure mechanism as before) to fire once that specific shot
+  is actually resolved: either it hits something (removed by
+  `ProjectileContactListener`'s `flushRemovals` - detected via a new
+  `engineHasEntity` check, run right after `flushRemovals` each frame so
+  a same-frame impact is caught immediately, not one frame late), or it
+  has been continuously outside the play field
+  (`WORLD_WIDTH` x `WORLD_HEIGHT`, unchanged rectangle - still a
+  pragmatic stand-in for the still-undecided future field-size cap) for
+  `FIELD_EXIT_TURN_END_SECONDS` (3s). Being off *camera* (pinch/pan/zoom
+  looking elsewhere) never starts this timer - only actually leaving the
+  fixed play-field rectangle does, exactly as designed.
+- **A shot that times out via field-exit is NOT destroyed - it becomes a
+  persistent "stray."** `ProjectileComponent` now carries a `side`
+  (`Side.PLAYER`/`Side.AI`, new enum in Components.kt) so a stray can
+  still be attributed to whoever fired it long after the fact. A stray
+  keeps its `GravityAffectedComponent`/`ProjectileComponent` tags and
+  keeps existing/simulating/getting pulled by gravity indefinitely -
+  `ProjectileContactListener` needs zero changes, since it already
+  treats any `ProjectileComponent`-tagged entity generically, so a stray
+  drifting back in and hitting something (even its own side) deals real
+  damage exactly like a fresh shot, per Boo's explicit "it absolutely
+  can still cause damage. even to oneself. thats the unexpected element
+  I like."
+- **Per-side stray cap: 4 per side, 8 total, oldest-first eviction,
+  sides independent.** `playerStrays`/`aiStrays` (two separate lists) -
+  `addStray` appends the newly-timed-out shot to its own side's list and,
+  if that pushes the side over `STRAY_SHOT_CAP_PER_SIDE` (4), immediately
+  despawns (destroys body + removes entity, bypassing
+  `ProjectileContactListener`'s deferred-removal queue since this never
+  runs from inside a Box2D contact callback) that same side's own oldest
+  stray. The two sides never affect each other's cap. Each frame, right
+  after `flushRemovals`, both lists get pruned of any entry a later
+  impact already destroyed, so a stray that dies naturally doesn't keep
+  occupying a cap slot forever.
+- **No failsafe/backstop timer for a shot that never resolves either
+  way** (e.g. drifts into a stable orbit outside the field and never
+  crosses back in or hits anything) - considered and explicitly declined
+  by Boo: "i dont care about something getting in a stable orbit."
+- **Camera snap is eased, not an instant jump-cut.** Boo: "the
+  abruptness." `snapCameraToActiveAvatar` now starts a
+  `CAMERA_EASE_DURATION_SECONDS` (0.5s) smoothstep transition from the
+  camera's current position/zoom to the target avatar's framing, advanced
+  every frame in `render()`, instead of setting `camera.position`/
+  `camera.zoom` outright. An `instant` parameter (used only for the very
+  first framing in `init{}`, where there's nothing worth easing from yet)
+  keeps the old jump-cut behavior available. `CameraGestureController`'s
+  `onGestureEngaged` callback cancels an in-progress ease the instant the
+  player starts a 2-finger pinch/pan, so a snap never fights the player's
+  own camera control.
+
+**Deliberately not built this phase** (still open per the "Multi-
+character combat" design note's "Still not decided" list): the
+play-field-size cap tied to celestial-object count/size, the scattered-
+with-region-quota planet placement algorithm, and squad composition/AI
+behavior with multiple characters. Also not part of this phase (Boo's
+separate, still-queued items from the same conversation): revisiting
+planet/celestial graphics and design language, keeping the aim line
+always visible (red when aiming at your own planet) instead of hiding it
+below the horizon, and removing post-shot movement entirely in favor of
+a pre-shot-only movement budget.
+
+### How to test Phase 25 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Take a shot that clearly hits something (a planet or a character) -
+   confirm the turn hands off promptly right on impact, same responsive
+   feel as before, not a fixed multi-second wait regardless of outcome.
+3. Take a shot and immediately pinch/pan/zoom away from it while it's
+   still flying - confirm you can freely look around, and that the turn
+   does NOT hand off just because the shot is off-screen; it should only
+   hand off once you can confirm (e.g. by panning back to look) that the
+   shot has either hit something or genuinely left the fixed play field
+   for a few seconds.
+4. Fire a wild shot that flies out past the edge of the field and never
+   comes back or hits anything - confirm the turn still hands off after
+   a few seconds (not never), and that the projectile is NOT visibly
+   destroyed - if you pan/zoom out far enough you should still be able
+   to find it drifting.
+5. Let a stray shot drift back into the play field and hit something
+   (including its own side's planet/character, if you can arrange it) -
+   confirm it deals real damage exactly like a fresh shot would.
+6. Deliberately rack up more than 4 strays on one side (repeatedly miss
+   and let shots time out past the field boundary) - confirm the oldest
+   one quietly disappears once the 5th would-be stray times out, and
+   that the OTHER side's own stray count is unaffected by this.
+7. Confirm every turn-handoff camera snap (both directions - player to
+   AI and back) now visibly eases into place over about half a second
+   instead of jump-cutting; confirm starting a 2-finger pinch/pan during
+   that eased transition takes over cleanly without any camera fighting
+   or snapping back.
+8. General feel check: does 3 seconds (`FIELD_EXIT_TURN_END_SECONDS`)
+   feel like the right "few seconds" for the field-exit timer? Does 0.5
+   seconds feel right for the camera ease? Both still starting guesses.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

@@ -172,19 +172,34 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // symmetric fight.
         private const val LAUNCH_PLANET_MASS = TARGET_PLANET_MASS
 
-        // Sept 2026 session - Boo, on-device: could start moving to dodge
-        // the AI's shot while it was still in flight, because the AI->player
-        // input handoff happened essentially the instant the AI fired (its
-        // own post-shot reposition is synchronous, not animated, so there
-        // was no real gap between "missile leaves" and "player has full
-        // control again"). Flat freeze on BOTH directions of turn handoff -
-        // "I do not want either player to be able to move for 3 seconds
-        // after the enemy has taken a shot." Retuned 3f -> 5f after a
-        // testing pass (same session) - Boo wanted a longer pause, no other
-        // behavior change. A more interesting version of this mechanic
-        // (Boo flagged it, not yet designed) is captured as a design note
-        // in PROJECT_STATE.md.
-        private const val SHOT_FLIGHT_FREEZE_SECONDS = 5f
+        // Sept 2026 session - replaces the old flat SHOT_FLIGHT_FREEZE_SECONDS
+        // (a fixed 5-second freeze after every shot, win or lose, regardless
+        // of what actually happened to it). Boo's complaint that motivated
+        // the original freeze - being able to dodge a shot still in flight -
+        // is now handled more fundamentally: the turn simply doesn't hand
+        // off until the shot fired this turn is actually resolved. This
+        // constant is "the few seconds" from that later design conversation
+        // - how long a shot has to be continuously outside the
+        // WORLD_WIDTH x WORLD_HEIGHT play field (not off-screen - the
+        // player's own pinch/pan/zoom doesn't count, see activeShotEntity's
+        // doc comment) before it's treated as resolved and becomes a
+        // persistent "stray" instead of still being watched. A shot that
+        // hits something resolves immediately regardless of this timer.
+        private const val FIELD_EXIT_TURN_END_SECONDS = 3f
+
+        // Sept 2026 session - Boo: "each player can have 4 stray shots for
+        // a total of 8. and agreed on the oldest is quietly retired if a
+        // cap is reached and a new shot misses." The two sides' caps are
+        // independent (never cross-affect each other) - 4 + 4 = 8 total is
+        // just a consequence of that, not a separately-enforced number.
+        private const val STRAY_SHOT_CAP_PER_SIDE = 4
+
+        // Sept 2026 session - Boo: "the abruptness [of the camera snap]. and
+        // you cant see your shot and follow it to completion." Replaces the
+        // instant camera.position.set/camera.zoom jump-cut in
+        // snapCameraToActiveAvatar with a short eased transition. Tunable,
+        // not derived from anything.
+        private const val CAMERA_EASE_DURATION_SECONDS = 0.5f
 
         // Phase 12 - illustrative, not tuned. Purely pacing (long enough
         // that the turn hand-off is visible, not so long it feels sluggish).
@@ -411,6 +426,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var celestialObstacles: List<AiTurnController.Obstacle>
     private lateinit var trajectorySimulator: TrajectorySimulator
 
+    // Sept 2026 session - see snapCameraToActiveAvatar's doc comment and
+    // CAMERA_EASE_DURATION_SECONDS. Only active for a short window right
+    // after a turn-handoff snap; cameraGestureController's onGestureEngaged
+    // (below) cancels it the instant the player starts a 2-finger pinch/pan,
+    // so an in-progress ease never fights the player's own camera control.
+    private var cameraEaseActive = false
+    private var cameraEaseElapsed = 0f
+    private val cameraEaseFromPosition = Vector2()
+    private var cameraEaseFromZoom = 1f
+    private val cameraEaseToPosition = Vector2()
+    private var cameraEaseToZoom = 1f
+
     // Phase 13 - the avatar's own physics body. Kinematic, not dynamic:
     // the avatar moves under AvatarMovementController's direct control
     // (button taps stepping it around the planet), never under physics
@@ -425,22 +452,49 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var avatarEntity: Entity
     private lateinit var targetCharacterEntity: Entity
 
-    // Sept 2026 session - see SHOT_FLIGHT_FREEZE_SECONDS's doc comment.
-    // Ticks down from that value the instant fireMissile() spawns anything,
-    // for either side. While positive, neither turn-handoff callback below
-    // (AvatarMovementController's onTurnPassed, AiTurnController's
-    // onTurnComplete) performs its handoff immediately - each instead
-    // stashes the action it would have run in pendingTurnHandoff, and
-    // render() below fires it the instant the freeze expires. Deliberately
-    // does NOT touch either side's own established post-shot movement
-    // (AvatarMovementController.Phase.POST_SHOT, AiTurnController.fire()'s
-    // own reposition() call) - those already happen synchronously, in the
-    // same turn, before a handoff is ever attempted, so "take cover" still
-    // works exactly as before. Only ever one pending handoff at a time -
-    // by construction, nothing can trigger a second turn transition while
-    // this is still counting down.
-    private var shotFlightFreezeRemaining = 0f
+    // Sept 2026 session - replaces the old shotFlightFreezeRemaining flat
+    // timer. See FIELD_EXIT_TURN_END_SECONDS's doc comment for the full
+    // design. [shotResolved] is false from the instant fireMissile() spawns
+    // anything until that shot is resolved one of two ways: it hits
+    // something ([activeShotEntity] gets removed from the engine by
+    // [ProjectileContactListener]'s flushRemovals - checked in render() via
+    // [engineHasEntity]), or it has been continuously outside the play
+    // field for [FIELD_EXIT_TURN_END_SECONDS] (tracked by
+    // [activeShotOutsideFieldSeconds], reset to 0 any frame it's back
+    // inside). [activeShotSide] records which side fired it purely so a
+    // field-exit resolution knows which side's stray list ([playerStrays]/
+    // [aiStrays]) to add it to. While !shotResolved, neither turn-handoff
+    // callback below (AvatarMovementController's onTurnPassed,
+    // AiTurnController's onTurnComplete) performs its handoff immediately -
+    // each instead stashes the action it would have run in
+    // [pendingTurnHandoff], and render() fires it the instant the shot
+    // resolves. Deliberately does NOT touch either side's own established
+    // post-shot movement (AvatarMovementController.Phase.POST_SHOT,
+    // AiTurnController.fire()'s own reposition() call) - those already
+    // happen synchronously, in the same turn, before a handoff is ever
+    // attempted. Only ever one active shot/pending handoff at a time - by
+    // construction, nothing can trigger a second turn transition while a
+    // shot is still unresolved. No failsafe timer for a shot that never
+    // resolves either way (e.g. a stable orbit) - Boo, explicit: "i dont
+    // care about something getting in a stable orbit."
+    private var shotResolved = true
+    private var activeShotEntity: Entity? = null
+    private var activeShotSide: Side? = null
+    private var activeShotOutsideFieldSeconds = 0f
     private var pendingTurnHandoff: (() -> Unit)? = null
+
+    // Sept 2026 session - a shot that resolved via the field-exit timeout
+    // above (rather than an impact) isn't destroyed - it's added here
+    // instead, and keeps existing/simulating/dealing real damage
+    // indefinitely (still GravityAffectedComponent/ProjectileComponent-
+    // tagged, still watched by ProjectileContactListener same as any other
+    // projectile) until it eventually hits something or is evicted to make
+    // room for a newer stray on the same side - see [addStray]. Ordered
+    // oldest-first (index 0) to newest; render() prunes an entry the
+    // instant ProjectileContactListener removes its entity via a later
+    // impact, so this only ever holds still-live strays.
+    private val playerStrays = mutableListOf<Entity>()
+    private val aiStrays = mutableListOf<Entity>()
     // Phase 14 - Kinematic now, not Static (see avatarBody's doc comment
     // for why Kinematic is the right body type for "moves under direct
     // control, still collidable"), since aiTurnController can now
@@ -628,7 +682,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         cameraGestureController = CameraGestureController(
             camera = camera,
             viewport = viewport,
-            onGestureEngaged = { slingshotInputProcessor.cancelAim() }
+            onGestureEngaged = {
+                slingshotInputProcessor.cancelAim()
+                // Sept 2026 session - a turn-handoff snap easing toward its
+                // target shouldn't keep fighting the player's own pinch/pan
+                // once they take over the camera themselves.
+                cameraEaseActive = false
+            }
         )
 
         // Zero, not -9.8: GravitySystem is the only source of gravity - see
@@ -715,13 +775,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             shotSpeedMultiplier = { shotSpeedTuning.multiplier },
             aimErrorDegrees = AI_AIM_ERROR_DEGREES,
             aimErrorSpeedFraction = AI_AIM_ERROR_SPEED_FRACTION,
-            onFire = { origin, velocity -> fireMissile(origin, velocity, excludeCategory = CATEGORY_AI_TARGET) },
+            onFire = { origin, velocity -> fireMissile(origin, velocity, side = Side.AI, excludeCategory = CATEGORY_AI_TARGET) },
             onTurnComplete = {
                 val giveControlToPlayer = {
                     Gdx.input.inputProcessor = fullInputProcessor
                     snapCameraToActiveAvatar(avatarMovementController.position)
                 }
-                if (shotFlightFreezeRemaining > 0f) {
+                // Sept 2026 session - fireMissile() (called synchronously,
+                // just above this callback, inside AiTurnController.fire())
+                // always sets shotResolved = false for the shot it just
+                // fired, so this is never reached with shotResolved already
+                // true - see shotResolved's doc comment.
+                if (!shotResolved) {
                     pendingTurnHandoff = giveControlToPlayer
                 } else {
                     giveControlToPlayer()
@@ -749,7 +814,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                     aiTurnController.startTurn(avatarMovementController.position)
                     snapCameraToActiveAvatar(aiTurnController.position)
                 }
-                if (shotFlightFreezeRemaining > 0f) {
+                // Sept 2026 session - onTurnPassed only ever fires from
+                // Phase.POST_SHOT (either its step budget hitting zero or an
+                // early Pass tap - see AvatarMovementController), which only
+                // happens after onFired(), which only happens after
+                // fireMissile() already set shotResolved = false for this
+                // turn's shot - so shotResolved can be true here only if
+                // that shot already resolved (e.g. hit something) during the
+                // player's own post-shot repositioning, before they passed.
+                if (!shotResolved) {
                     pendingTurnHandoff = startAiTurn
                 } else {
                     startAiTurn()
@@ -778,7 +851,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             aimErrorSpeedFraction = PLAYER_AIM_ERROR_SPEED_FRACTION,
             onFire = { velocity ->
                 if (avatarMovementController.canFire) {
-                    fireMissile(launchPoint, velocity, excludeCategory = CATEGORY_PLAYER_AVATAR)
+                    fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = CATEGORY_PLAYER_AVATAR)
                     avatarMovementController.onFired()
                 }
             }
@@ -788,8 +861,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         // Sept 2026 session - frames the player's own avatar from the very
         // first frame, same as every later turn-transition snap, instead of
-        // starting on the old fixed full-world view.
-        snapCameraToActiveAvatar(avatarMovementController.position)
+        // starting on the old fixed full-world view. instant = true here
+        // specifically - there's nothing worth easing FROM yet (the camera
+        // hasn't been placed anywhere meaningful this run), unlike every
+        // later turn-handoff snap.
+        snapCameraToActiveAvatar(avatarMovementController.position, instant = true)
     }
 
     override fun show() {
@@ -1026,13 +1102,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * everything else the missile can hit still collides normally. `0`
      * (the default) excludes nothing, for anything fired from a spot with
      * no fixture of its own to worry about colliding with.
+     *
+     * [side] (Sept 2026 session) tags the spawned [ProjectileComponent] and
+     * begins tracking it as [activeShotEntity] - see that field's doc
+     * comment - so the turn doesn't hand off until this shot resolves.
+     * Returns the created [Entity] so a caller could inspect/track it
+     * further, though nothing outside this class currently needs to -
+     * [activeShotEntity] already covers PlayScreen's own needs.
      */
-    private fun fireMissile(origin: Vector2, velocity: Vector2, excludeCategory: Short = 0) {
-        // See SHOT_FLIGHT_FREEZE_SECONDS's doc comment - starts (or
-        // restarts) the freeze the instant anything is actually fired,
-        // regardless of which side.
-        shotFlightFreezeRemaining = SHOT_FLIGHT_FREEZE_SECONDS
-
+    private fun fireMissile(origin: Vector2, velocity: Vector2, side: Side, excludeCategory: Short = 0): Entity {
         val bodyDef = BodyDef().apply {
             type = BodyDef.BodyType.DynamicBody
             position.set(origin)
@@ -1052,14 +1130,83 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         shape.dispose()
         body.linearVelocity = velocity
 
-        engine.addEntity(
-            Entity().apply {
-                add(PhysicsBodyComponent(body))
-                add(GravityAffectedComponent())
-                add(ProjectileComponent())
-                add(TrailComponent(TRAIL_MAX_POINTS))
-            }
-        )
+        val entity = Entity().apply {
+            add(PhysicsBodyComponent(body))
+            add(GravityAffectedComponent())
+            add(ProjectileComponent(side))
+            add(TrailComponent(TRAIL_MAX_POINTS))
+        }
+        engine.addEntity(entity)
+
+        // Sept 2026 session - see activeShotEntity's doc comment. Replaces
+        // the old flat SHOT_FLIGHT_FREEZE_SECONDS reset that used to happen
+        // here.
+        shotResolved = false
+        activeShotEntity = entity
+        activeShotSide = side
+        activeShotOutsideFieldSeconds = 0f
+
+        return entity
+    }
+
+    /** True if [entity] is still live in [engine] - see activeShotEntity's and addStray's doc comments for why this needs checking. */
+    private fun engineHasEntity(entity: Entity): Boolean = engine.entities.any { it === entity }
+
+    /**
+     * Sept 2026 session - called from render() the instant [activeShotEntity]
+     * is found resolved, either via impact (already destroyed by
+     * [ProjectileContactListener]) or a field-exit timeout (handled by the
+     * caller via [addStray] before calling this). Fires whatever handoff
+     * had been stashed in [pendingTurnHandoff] - see [shotResolved]'s doc
+     * comment - or, if the turn hasn't actually been passed yet (the
+     * player can still be mid post-shot repositioning when a shot resolves
+     * early), just clears the tracking so the eventual onTurnPassed/
+     * onTurnComplete call sees shotResolved already true and hands off
+     * immediately instead of waiting on a shot that's already done.
+     */
+    private fun resolveActiveShot() {
+        shotResolved = true
+        activeShotEntity = null
+        activeShotSide = null
+        activeShotOutsideFieldSeconds = 0f
+        pendingTurnHandoff?.invoke()
+        pendingTurnHandoff = null
+    }
+
+    /**
+     * Sept 2026 session - called the instant a shot has been continuously
+     * outside the play field for FIELD_EXIT_TURN_END_SECONDS (see
+     * activeShotEntity's doc comment). [entity] is NOT destroyed here - it's
+     * added to [side]'s stray list so it keeps existing/simulating/dealing
+     * real damage indefinitely afterward - Boo, explicit: "it absolutely
+     * can still cause damage. even to oneself. thats the unexpected element
+     * I like." Enforces STRAY_SHOT_CAP_PER_SIDE by quietly despawning that
+     * same side's own oldest stray if adding this one would push it over -
+     * the two sides' caps/eviction never affect each other.
+     */
+    private fun addStray(side: Side, entity: Entity) {
+        val strays = when (side) {
+            Side.PLAYER -> playerStrays
+            Side.AI -> aiStrays
+        }
+        strays.add(entity)
+        if (strays.size > STRAY_SHOT_CAP_PER_SIDE) {
+            despawnStray(strays.removeAt(0))
+        }
+    }
+
+    /**
+     * Directly destroys a stray to make room for a newer one on the same
+     * side - see [addStray]. Unlike a normal impact-resolved projectile,
+     * nothing else ever queues this particular removal, so it goes straight
+     * to [World.destroyBody]/[Engine.removeEntity] rather than through
+     * [ProjectileContactListener]'s deferred-removal queue (safe here since
+     * this never runs from inside a Box2D contact callback).
+     */
+    private fun despawnStray(entity: Entity) {
+        if (!engineHasEntity(entity)) return // already removed by a later impact - see render()'s stray-pruning step
+        world.destroyBody(physicsBodyMapper.get(entity).body)
+        engine.removeEntity(entity)
     }
 
     /**
@@ -1068,33 +1215,54 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * transition (from inside the deferred giveControlToPlayer/startAiTurn
      * closures specifically, not the outer onTurnPassed/onTurnComplete
      * bodies - those can fire well before the handoff they describe
-     * actually happens, see shotFlightFreezeRemaining's doc comment) and
-     * once more up front in init{} so the very first turn starts framed
-     * too. Deliberately a one-time snap, not a continuous follow - between
+     * actually happens, see shotResolved's doc comment) and once more up
+     * front in init{} so the very first turn starts framed too.
+     * Deliberately a one-time snap, not a continuous follow - between
      * snaps the player is free to pinch/pan/zoom anywhere via
      * cameraGestureController, including all through their own turn's
      * aiming and after they've fired; this does not fight that.
+     *
+     * **Sept 2026 session addendum:** Boo - "the abruptness [of the snap]."
+     * Rather than jumping the camera there in one frame, this now starts a
+     * short eased transition (see CAMERA_EASE_DURATION_SECONDS and the
+     * cameraEase* fields' doc comment) that render() advances every frame;
+     * [instant] skips straight to the old jump-cut behavior, used only for
+     * the very first framing in init{} where there's nothing worth easing
+     * from yet.
      */
-    private fun snapCameraToActiveAvatar(worldPosition: Vector2) {
-        camera.position.set(worldPosition.x, worldPosition.y, 0f)
-        camera.zoom = AVATAR_SNAP_ZOOM
+    private fun snapCameraToActiveAvatar(worldPosition: Vector2, instant: Boolean = false) {
+        if (instant) {
+            camera.position.set(worldPosition.x, worldPosition.y, 0f)
+            camera.zoom = AVATAR_SNAP_ZOOM
+            cameraEaseActive = false
+            return
+        }
+        cameraEaseFromPosition.set(camera.position.x, camera.position.y)
+        cameraEaseFromZoom = camera.zoom
+        cameraEaseToPosition.set(worldPosition)
+        cameraEaseToZoom = AVATAR_SNAP_ZOOM
+        cameraEaseElapsed = 0f
+        cameraEaseActive = true
     }
 
     override fun render(delta: Float) {
-        // See SHOT_FLIGHT_FREEZE_SECONDS's doc comment - counts down every
-        // frame regardless of whose "turn" it nominally is, and fires
-        // whichever handoff got deferred the instant it expires. Checked
-        // first, before anything else this frame, so a handoff that fires
-        // this frame (e.g. AiTurnController.startTurn's own synchronous
-        // reposition) is reflected in the rest of this same frame's update/
-        // render, not one frame late.
-        if (shotFlightFreezeRemaining > 0f) {
-            shotFlightFreezeRemaining -= delta
-            if (shotFlightFreezeRemaining <= 0f) {
-                shotFlightFreezeRemaining = 0f
-                pendingTurnHandoff?.invoke()
-                pendingTurnHandoff = null
-            }
+        // Sept 2026 session - see snapCameraToActiveAvatar's doc comment.
+        // Eases the camera toward wherever a turn-handoff snap most
+        // recently targeted, instead of jump-cutting there in one frame.
+        // Runs every frame regardless of turn state; cancelled early by
+        // cameraGestureController's onGestureEngaged (see init{}) the
+        // instant the player starts a 2-finger pinch/pan.
+        if (cameraEaseActive) {
+            cameraEaseElapsed += delta
+            val t = (cameraEaseElapsed / CAMERA_EASE_DURATION_SECONDS).coerceIn(0f, 1f)
+            val eased = t * t * (3f - 2f * t) // smoothstep - eases in and out, no linear jerk at either end
+            camera.position.set(
+                MathUtils.lerp(cameraEaseFromPosition.x, cameraEaseToPosition.x, eased),
+                MathUtils.lerp(cameraEaseFromPosition.y, cameraEaseToPosition.y, eased),
+                0f
+            )
+            camera.zoom = MathUtils.lerp(cameraEaseFromZoom, cameraEaseToZoom, eased)
+            if (t >= 1f) cameraEaseActive = false
         }
 
         // Phase 9: the avatar can move between frames (movement-button taps
@@ -1116,6 +1284,37 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // engine.update above is exactly that point, since PhysicsSystem's
         // step loop is synchronous.
         projectileContactListener.flushRemovals(world)
+
+        // Sept 2026 session - drops any stray whose entity flushRemovals
+        // just above already destroyed (it hit something later, same as
+        // any other projectile) - see addStray's doc comment. Without this,
+        // a dead stray would keep silently occupying a slot in its side's
+        // cap forever.
+        playerStrays.removeAll { !engineHasEntity(it) }
+        aiStrays.removeAll { !engineHasEntity(it) }
+
+        // Sept 2026 session - see shotResolved's doc comment for the full
+        // design. Checked here (after flushRemovals, not at the top of this
+        // method) specifically so an impact this same frame is caught
+        // immediately rather than one frame late.
+        if (!shotResolved) {
+            val entity = activeShotEntity
+            if (entity == null || !engineHasEntity(entity)) {
+                resolveActiveShot()
+            } else {
+                val position = physicsBodyMapper.get(entity).body.position
+                val outsideField = position.x < 0f || position.x > WORLD_WIDTH || position.y < 0f || position.y > WORLD_HEIGHT
+                if (outsideField) {
+                    activeShotOutsideFieldSeconds += delta
+                    if (activeShotOutsideFieldSeconds >= FIELD_EXIT_TURN_END_SECONDS) {
+                        activeShotSide?.let { addStray(it, entity) }
+                        resolveActiveShot()
+                    }
+                } else {
+                    activeShotOutsideFieldSeconds = 0f
+                }
+            }
+        }
 
         // Phase 22 - win/loss detection, character HP only (a destroyed
         // planet does NOT end the game by itself - see PROJECT_STATE.md's
@@ -1578,15 +1777,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val labelValueGap = HudFont.scaled(16f)
         val minContentWidth = HudFont.scaled(220f)
 
-        // shotFlightFreezeRemaining checked first: AiTurnController.isTurnActive
-        // already goes false the instant the AI fires (before its own
+        // shotResolved checked first: AiTurnController.isTurnActive already
+        // goes false the instant the AI fires (before its own
         // onTurnComplete callback even runs - see AiTurnController.fire()),
         // and AvatarMovementController's own phase/stepsRemaining already
         // reset for the player's next turn the instant THEY pass (see
         // AvatarMovementController.passTurn()) - so without this check
         // first, the HUD would claim it's someone's turn to act during the
         // exact window neither side actually can.
-        val turnLabel = if (shotFlightFreezeRemaining > 0f) {
+        val turnLabel = if (!shotResolved) {
             "Turn ${avatarMovementController.turnNumber} - Shot in flight..."
         } else if (aiTurnController.isTurnActive) {
             "Turn ${avatarMovementController.turnNumber} - AI's turn..."

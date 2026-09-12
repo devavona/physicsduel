@@ -57,13 +57,29 @@ class GravitySourceComponent(val initialMass: Float, val isDamageable: Boolean =
 class GravityAffectedComponent : Component
 
 /**
+ * Which side fired a projectile - see [ProjectileComponent.side]. Sept 2026
+ * session: needed once missed shots became persistent "stray" projectiles
+ * (see [PlayScreen]'s activeShotEntity doc comment) - PlayScreen tracks each
+ * side's own strays (and enforces each side's own 4-stray cap) separately,
+ * so it needs to know which side a given projectile belongs to well after
+ * it was fired, not just at the moment [PlayScreen.fireMissile] is called.
+ */
+enum class Side { PLAYER, AI }
+
+/**
  * Marker/tag component: entities with this are a fired projectile (Phase 8's
  * missile) rather than a permanent scene body (a planet, a star). Lets
  * [ProjectileContactListener] tell "something that should be removed on
  * impact" apart from anything else a body might collide with, without
  * needing every non-projectile body to also carry some "permanent" marker.
+ *
+ * **Sept 2026 session:** [side] added so a projectile can still be
+ * attributed to whoever fired it long after the fact - a missed shot can
+ * now persist indefinitely as a "stray" (see [PlayScreen]'s
+ * activeShotEntity doc comment) well past the turn that fired it, and
+ * PlayScreen needs to know which side's stray-cap it counts against.
  */
-class ProjectileComponent : Component
+class ProjectileComponent(val side: Side) : Component
 
 /**
  * Gives an entity hit points a hit can reduce - the "health lives on
