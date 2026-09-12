@@ -3254,6 +3254,70 @@ a pre-shot-only movement budget.
    feel like the right "few seconds" for the field-exit timer? Does 0.5
    seconds feel right for the camera ease? Both still starting guesses.
 
+## Phase 26: real planet art (Kenney CC0 "Planets" pack)
+
+Picks up item #2 from Boo's post-Phase-24 feedback list - "I want to
+revisit the graphics and planets... figure out a good design language or
+find a good open source library of celestial objects." Boo, walked
+through the options (sprite pack vs. a custom procedural shader vs.
+improving the existing procedural art), chose to try Kenney's real pack
+first, same plan discussed back at Phase 18 - only this time it actually
+worked, since Boo downloaded it himself in his own browser (which can
+reach kenney.nl fine) and handed the zip over directly, sidestepping the
+egress-allowlist block that stopped this the first time (see Phase 18's
+"Where the art came from" note - neither the cloud sandbox nor the
+device-bridge shell can reach any external asset host, Kenney or
+otherwise, confirmed again this session before asking Boo to grab it
+himself).
+
+**What changed:** `planet_launch.png` and `planet_target.png` in
+`android/src/main/assets/textures/` were replaced with two sprites from
+Kenney's **Planets (1.0)** pack (CC0, kenney.nl) - `planet02.png` (warm
+orange/rust/maroon, matching the existing "warm rust/orange rocky world"
+launch-planet identity) and `planet00.png` (teal/mint/blue, matching the
+existing "cool teal/blue oceanic world" target-planet identity),
+downscaled from their native 1280x1280 to the existing 256x256 spec and
+saved under the same filenames - a pure file swap, **zero code changes**,
+exactly as Phase 18 predicted ("same filenames, same folder... since
+loading is a plain `Gdx.files.internal("textures/...")` lookup").
+`star.png` is UNCHANGED - Boo only grabbed the "Planets" pack, not
+Kenney's "Space Kit"/"Simple Space" (which do have sun/star sprites) - so
+the procedural star from Phase 18 is still in place, now alongside real
+planet art. A visible mismatch between the two styles (if any, once
+seen on-device) is expected until/unless Boo grabs a matching star too.
+
+The Kenney pack itself also ships a `Parts/` folder (separate sphere-
+shading, noise-texture, and light-phase layers meant for compositing
+custom planet variety, not just the 10 pre-rendered `planet00-09.png`
+finished sprites two of which were used here) - worth keeping in mind
+for later once more than 2 planets exist at once (per the still-open
+multi-planet-placement design), since it could give real variety instead
+of reusing/re-tinting the same 10 finished sprites.
+
+### How to test Phase 26 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Menu → Play. The launch planet should now show a warm orange/maroon
+   mottled sphere and the target planet a teal/mint/blue mottled sphere -
+   both noticeably more detailed than the old procedurally-generated
+   placeholder spheres, while keeping the same warm-vs-cool color
+   identity so the two planets are still instantly distinguishable at a
+   glance.
+3. Confirm both sprites are still centered and sized correctly against
+   their Box2D fixtures (same alignment check as Phase 18 - the sprites'
+   soft outer glow can bleed slightly past the wireframe, that's
+   expected and matches how `star.png`'s glow already works; the solid
+   sphere body itself should still fill the fixture circle).
+4. Confirm the damage-overlay crater/scorch effect (Phase 21) still
+   fades in correctly over the new art as each planet takes damage - it
+   draws in the same place using the same alpha-blend approach, so this
+   should need no changes, but worth a visual check since the new sprite
+   colors are quite different from the old ones.
+5. Confirm the star (unchanged, still the Phase 18 procedural version)
+   doesn't look jarringly out of place next to the new planet art - flag
+   it if it does, since a matching Kenney star sprite is an easy
+   follow-up if Boo wants to grab the Space Kit/Simple Space pack too.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
