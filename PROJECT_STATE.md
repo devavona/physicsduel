@@ -3418,6 +3418,47 @@ but flagged here in case Boo wants that made consistent too later.
    a glance? Worth flagging if a different color or a distinct visual
    treatment (e.g. dashed vs. dotted) would read better in practice.
 
+### Phase 27 addendum: red preview draws through the planet, capped to a fixed 24 dots
+
+First on-device test of Phase 27 found the red preview effectively
+invisible in practice - Boo: "I want the red patch to extend like the
+other aim line. even if its throgh the planet. I cannot see it as it
+is." The cause: aiming below horizon points straight back at the
+shooter's own planet, and the existing obstacle-stop logic (the same
+logic that correctly truncates the normal, legal preview right where it
+would hit something) was cutting the red preview off after just a step
+or two of simulation, since it's pointed directly at an obstacle from
+the very first instant.
+
+**First fix (superseded immediately below):** skip the obstacle-stop
+check entirely while `belowHorizon`, so the red preview draws its full
+`effectiveMaxSeconds` length regardless of what's in its path. Boo,
+right after seeing that on-device: "lets not have it be full length.
+lets jst have it extend beyong the planet but 24 dots. just enough so
+the player nows its an invalid shot."
+
+**Final behavior:** the obstacle-stop skip stays (the red preview still
+draws straight through any celestial body rather than stopping at the
+first one), but it's now additionally capped at a fixed
+`AIM_PREVIEW_INVALID_DOT_COUNT` (24) dots regardless of
+`effectiveMaxSeconds` - a short, fixed-length red stub that clears the
+shooter's own planet and reads as "pointing here, and it's invalid,"
+not a full trajectory projection (which wouldn't mean anything anyway
+once it's simulating gravity through solid ground). The legal (gray)
+preview is untouched by any of this - still obstacle-stopped, still
+runs the full `effectiveMaxSeconds` when nothing blocks it.
+
+#### How to test the Phase 27 addendum on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Aim below your own horizon - confirm the red dots now extend a short,
+   clearly-visible stub (about 24 dots, passing through your own planet
+   if that's the pointed direction) rather than stopping almost
+   immediately, and rather than running the full length of a normal
+   preview.
+3. Aim in a normal, legal direction - confirm the gray preview's length/
+   obstacle-stop behavior is unchanged from before this addendum.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
