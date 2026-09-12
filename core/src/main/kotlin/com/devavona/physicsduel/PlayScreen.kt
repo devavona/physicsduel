@@ -275,6 +275,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val AIM_PREVIEW_DOT_INTERVAL_STEPS = 4
         private const val AIM_PREVIEW_DOT_RADIUS = 0.05f
 
+        // Sept 2026 session - Boo, after the red below-horizon preview was
+        // made to draw through obstacles instead of stopping at the first
+        // one (see renderAimTrajectoryPreview's doc comment): "lets not
+        // have it be full length. lets jst have it extend beyong the
+        // planet but 24 dots. just enough so the player nows its an
+        // invalid shot." A short, fixed dot count rather than
+        // AIM_PREVIEW_MAX_SECONDS - just long enough to visibly clear the
+        // shooter's own planet and read as "this is pointing somewhere,"
+        // not a full-length trajectory (which wouldn't mean anything once
+        // it's simulating gravity through solid ground anyway).
+        private const val AIM_PREVIEW_INVALID_DOT_COUNT = 24
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -1624,21 +1636,22 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         var elapsed = 0f
         var stepIndex = 0
+        var dotsDrawn = 0
         while (elapsed < effectiveMaxSeconds) {
             trajectorySimulator.step(position, currentVelocity, AIM_PREVIEW_STEP_SECONDS, sources, multiplier)
             elapsed += AIM_PREVIEW_STEP_SECONDS
             stepIndex++
 
             // Sept 2026 session - Boo: "I want the red patch to extend
-            // like the other aim line. even if its through the planet. I
-            // cannot see it as it is." A below-horizon aim points straight
-            // back at the shooter's own planet, so the obstacle-stop below
-            // was cutting the red preview off after just a step or two -
-            // effectively invisible. Skipped entirely while belowHorizon so
-            // the red preview always draws its full effectiveMaxSeconds
-            // length, straight through any celestial body in its path; the
-            // normal (legal, gray) preview keeps stopping at the first
-            // obstacle it would actually hit, unchanged.
+            // like the other aim line. even if its through the planet."
+            // A below-horizon aim points straight back at the shooter's
+            // own planet, so the obstacle-stop below was cutting the red
+            // preview off after just a step or two - effectively
+            // invisible. Skipped entirely while belowHorizon so the red
+            // preview draws straight through any celestial body in its
+            // path instead of stopping at the first one; the normal
+            // (legal, gray) preview keeps stopping right where it would
+            // actually hit something, unchanged.
             if (!belowHorizon) {
                 var blocked = false
                 for (obstacle in celestialObstacles) {
@@ -1652,6 +1665,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
             if (stepIndex % AIM_PREVIEW_DOT_INTERVAL_STEPS == 0) {
                 shapeRenderer.circle(position.x, position.y, AIM_PREVIEW_DOT_RADIUS, 8)
+                dotsDrawn++
+                // Sept 2026 session - Boo, immediately after the above:
+                // "lets not have it be full length. lets jst have it
+                // extend beyong the planet but 24 dots. just enough so the
+                // player nows its an invalid shot." Only caps the red
+                // (belowHorizon) case - the normal gray preview still runs
+                // its own obstacle-stop/full-length logic above, untouched.
+                if (belowHorizon && dotsDrawn >= AIM_PREVIEW_INVALID_DOT_COUNT) break
             }
         }
         shapeRenderer.end()
