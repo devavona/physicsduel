@@ -1581,15 +1581,29 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * "this already happened" trail - this is only a projection, and stops
      * early (per [celestialObstacles]) if the predicted path would hit a
      * planet or the star before the preview window runs out.
+     *
+     * **Sept 2026 session revision.** Boo, on the original hide-it-below-
+     * horizon behavior: "the way the aiming dots disappear when aiming
+     * below the horizon becomes a little confusing in practice... keep the
+     * aim always visible but maybe its red when aiming at the planet."
+     * This never fully hides anymore - [belowHorizon] just switches the
+     * dot color from the normal light gray to red instead of skipping the
+     * draw. Firing behavior is unchanged: [SlingshotInputProcessor.touchUp]
+     * still refuses to fire at all on an illegal release (see that class's
+     * "Horizon restriction" doc paragraph) - the red dots ARE the
+     * explanation for why a release right now wouldn't fire, which is a
+     * more informative version of the same intent the hide-it behavior was
+     * originally going for, not a reversal of the no-fire-on-illegal-aim
+     * decision itself. Note [renderDebugOverlay]'s own matching check is
+     * intentionally left as-is - that overlay is explicitly a debug-only
+     * aid (see its doc comment), not the aiming UI Boo's feedback was
+     * about, which is this dotted preview.
      */
     private fun renderAimTrajectoryPreview() {
         val pull = slingshotInputProcessor.currentAimLine ?: return
         if (!avatarMovementController.canFire) return
         if (pull.isZero(0.01f)) return
-        // Sept 2026 session - see renderDebugOverlay's matching check;
-        // same visual tell, same reasoning, applied to the real
-        // player-facing preview this time.
-        if (slingshotInputProcessor.currentAimBelowHorizon) return
+        val belowHorizon = slingshotInputProcessor.currentAimBelowHorizon
 
         val speedTuning = shotSpeedTuning.multiplier
         val speed = minOf(pull.len() * PULL_POWER_SCALE, MAX_MISSILE_SPEED) * speedTuning
@@ -1606,7 +1620,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         shapeRenderer.projectionMatrix = camera.combined
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color.LIGHT_GRAY
+        shapeRenderer.color = if (belowHorizon) Color.RED else Color.LIGHT_GRAY
 
         var elapsed = 0f
         var stepIndex = 0
@@ -1615,14 +1629,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             elapsed += AIM_PREVIEW_STEP_SECONDS
             stepIndex++
 
-            var blocked = false
-            for (obstacle in celestialObstacles) {
-                if (position.dst(obstacle.center) <= obstacle.radius) {
-                    blocked = true
-                    break
+            // Sept 2026 session - Boo: "I want the red patch to extend
+            // like the other aim line. even if its through the planet. I
+            // cannot see it as it is." A below-horizon aim points straight
+            // back at the shooter's own planet, so the obstacle-stop below
+            // was cutting the red preview off after just a step or two -
+            // effectively invisible. Skipped entirely while belowHorizon so
+            // the red preview always draws its full effectiveMaxSeconds
+            // length, straight through any celestial body in its path; the
+            // normal (legal, gray) preview keeps stopping at the first
+            // obstacle it would actually hit, unchanged.
+            if (!belowHorizon) {
+                var blocked = false
+                for (obstacle in celestialObstacles) {
+                    if (position.dst(obstacle.center) <= obstacle.radius) {
+                        blocked = true
+                        break
+                    }
                 }
+                if (blocked) break
             }
-            if (blocked) break
 
             if (stepIndex % AIM_PREVIEW_DOT_INTERVAL_STEPS == 0) {
                 shapeRenderer.circle(position.x, position.y, AIM_PREVIEW_DOT_RADIUS, 8)

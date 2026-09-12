@@ -3359,6 +3359,65 @@ as before.
    red/pink for missiles) - unaffected, since only the three green
    (static-body) wireframes were targeted.
 
+## Phase 27: aim trajectory preview stays visible below horizon (red instead of hidden)
+
+Picks up item #3 from Boo's post-Phase-24 feedback list. Boo: "the way
+the aiming dots disappear when aiming below the horizon becomes a little
+confusing in practice. I am thinging to keep the aim always visible but
+maybe its red when aiming at the planet." The original hide-it behavior
+(`renderAimTrajectoryPreview` returning early when
+`SlingshotInputProcessor.currentAimBelowHorizon`) was itself a deliberate
+fix from an earlier on-device round - the very first version clamped an
+illegal release and fired it anyway, which read as inconsistent with a
+hidden aim line ("if the aim disappears, then even if you make a
+shooting gesture, it will not fire" - see `SlingshotInputProcessor`'s
+"Horizon restriction" doc paragraph). That firing-side fix (an illegal
+raw release now fires nothing at all, full stop) is UNCHANGED by this
+phase - only the rendering-side "hide it" half is replaced with "show it
+in red." The red dots now serve as the visual explanation for why a
+release right now wouldn't fire, which is arguably a more complete
+version of the same original intent rather than a reversal of it.
+
+**What changed:** `renderAimTrajectoryPreview()` no longer returns early
+on `currentAimBelowHorizon` - it still runs the exact same gravity-
+curved trajectory simulation/obstacle-stop logic as always, just reading
+that flag once into a local and using it to pick `Color.RED` instead of
+the normal `Color.LIGHT_GRAY` for the dots. Since aiming below horizon
+means pointing back toward your own launch planet, in practice this
+mostly shows a short red stub of dots terminating almost immediately at
+your own planet's surface (the same obstacle-stop logic that already
+truncates the preview early against any celestial body) - a clear "this
+would hit your own planet" visual rather than nothing at all.
+
+**Deliberately left alone:** `renderDebugOverlay()`'s own straight pull-
+line has the exact same currentAimBelowHorizon hide-check and was NOT
+touched - that overlay is explicitly documented as "a Phase 8 testing
+aid, not meant to be the final aiming UI," and Boo's feedback was
+specifically about "the aiming dots" (the Phase 16 gravity-curved
+preview), not the plain debug line. The two can now behave slightly
+differently below horizon (dots show in red, the debug line still
+vanishes) - low-impact since the debug line isn't the real aiming UI,
+but flagged here in case Boo wants that made consistent too later.
+
+### How to test Phase 27 on-device
+
+1. Sync Gradle, run on-device as usual.
+2. During your own turn, pull back to aim in a normal, legal direction -
+   confirm the dotted trajectory preview still shows in its usual light
+   gray, unchanged.
+3. Pull back so the aim points below your own local horizon (back toward
+   your own planet) - confirm the dots now show in red and stay visible,
+   instead of disappearing.
+4. Release while the dots are red - confirm nothing fires (unchanged
+   behavior; the red dots are the reason why, not a promise it will
+   fire).
+5. While aiming below horizon (red dots showing), move the aim back
+   above horizon without releasing - confirm the dots switch back to
+   light gray smoothly, still following the live drag.
+6. General feel check: does red communicate "this won't fire" clearly at
+   a glance? Worth flagging if a different color or a distinct visual
+   treatment (e.g. dashed vs. dotted) would read better in practice.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
