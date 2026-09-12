@@ -898,6 +898,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         slingshotInputProcessor = SlingshotInputProcessor(
             launchPoint = launchPoint,
             planetCenter = launchPlanetPosition,
+            planetRadius = PLANET_RADIUS,
             viewport = viewport,
             powerScale = PULL_POWER_SCALE,
             maxSpeed = MAX_MISSILE_SPEED,

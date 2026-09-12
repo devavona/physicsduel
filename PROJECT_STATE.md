@@ -2795,6 +2795,58 @@ direction was leaning toward rather than snapping to one fixed side.
    flat/unnatural or inconsistent now that the player's side works
    differently? Worth a call on whether the AI should match.
 
+### Horizon geometry corrected (flat-plane bug) - Sept 2026 session, after Phase 28
+
+On-device, after Phase 27's red-dot preview had been playing for a
+while, Boo: "note how the red dots appear even though the aim is not
+through the planet." The bug: `isBelowHorizon`/`clampAboveHorizon` never
+actually tested "does this shot hit the planet" - they tested "does this
+shot have any downward component relative to the flat plane tangent to
+the planet at the firing position." That's only the same thing if the
+firing position sits exactly ON the planet's surface. It doesn't -
+`LAUNCH_POINT_CLEARANCE` (0.3) holds the avatar/AI above `PLANET_RADIUS`
+(0.8) - so the sphere's real curve falls away well below that flat
+plane. Worked out geometrically (right triangle: hypotenuse = distance
+from the planet's center to the firing position, opposite side = the
+planet's radius), a shot at this game's actual proportions can dip about
+**47 degrees** below the flat horizon and still cleanly clear the
+planet - the old check was flagging all of that as illegal.
+
+**Fix.** Both `SlingshotInputProcessor.isBelowHorizon`/
+`clampAboveHorizon` (player) and `AiTurnController.clampAboveHorizon`
+(AI) now compute the true tangent-to-sphere grazing angle instead of
+assuming zero clearance - a new private `horizonSinThreshold(origin)` in
+each (sine of the grazing angle = planetRadius / distance-to-planet-
+center), used to build the exact `cos`/`sin` components of the real
+grazing direction rather than the old "just zero out the radial
+component" approach. `SlingshotInputProcessor` needed a new constructor
+parameter, `planetRadius`, to do this (previously had `planetCenter` but
+nothing about the planet's size). Verified analytically (a quick script,
+not on-device) against real ray-sphere intersection math: the new legal/
+illegal boundary never lets an actually-hitting direction through, and
+every clamped shot lands exactly on the sphere's tangent line rather
+than still clipping it.
+
+Net effect: a noticeably wider legal firing cone before anything turns
+red, refuses to fire, or gets leveled off - same underlying rule ("never
+fire into your own planet"), just accurately drawn to the sphere's real
+silhouette instead of the flat plane at the firing height.
+
+#### How to test this fix on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Aim well below the flat horizon line (steeper than before) - confirm
+   the preview stays gray (legal) much further down than it used to,
+   right up until the shot would actually clip your own planet's curve.
+3. Confirm red only appears once the aim would genuinely intersect the
+   planet - not just "any downward tilt."
+4. Release right at that new boundary a few times - confirm it fires
+   (leveled off to the sphere's tangent, not the old flat skim) rather
+   than refusing.
+5. Watch a few AI turns from different repositioned angles - confirm its
+   shots/candidate search aren't visibly more conservative than before
+   (the AI's search range effectively widened too, same fix).
+
 ### A real way to aim, then decide NOT to fire
 
 Boo: "there needs to be a way for you to aim and then decide to not

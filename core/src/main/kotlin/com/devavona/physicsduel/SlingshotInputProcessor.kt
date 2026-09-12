@@ -4,6 +4,7 @@ import com.badlogic.gdx.InputAdapter
 import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.utils.viewport.Viewport
+import kotlin.math.sqrt
 
 /**
  * Phase 8's aiming/fire input: pull back from a fixed [launchPoint] and
@@ -58,6 +59,22 @@ import com.badlogic.gdx.utils.viewport.Viewport
  * This class draws nothing itself - [currentAimBelowHorizon] is purely
  * for [PlayScreen] to read.
  *
+ * **Horizon geometry corrected (Sept 2026 session, later in the same
+ * pass).** Boo, after seeing red dots on shots that plainly weren't
+ * headed into the planet: "note how the red dots appear even though the
+ * aim is not through the planet." The original [isBelowHorizon] treated
+ * "below the flat plane tangent to the planet at [launchPoint]" as the
+ * whole test - correct only if the launcher stood exactly ON the
+ * surface. It actually stands some clearance above it (see [PlayScreen]'s
+ * launch-point setup), so the sphere's actual curve falls
+ * away below that flat plane - a shot can dip a real amount below it and
+ * still sail past the planet untouched. [horizonSinThreshold] computes
+ * the true grazing angle (a right triangle: hypotenuse = distance from
+ * [planetCenter] to the firing position, opposite side = [planetRadius])
+ * instead of assuming zero clearance, so [isBelowHorizon]/
+ * [clampAboveHorizon] now match the sphere's real silhouette. Mirrors the
+ * identical fix in [AiTurnController.clampAboveHorizon].
+ *
  * **Cancel gesture (Sept 2026 session).** Boo: "there needs to be a way
  * to aim and then decide not to fire," but didn't want a dedicated
  * button for it. [touchUp] now also cancels (same as the existing
@@ -79,6 +96,11 @@ class SlingshotInputProcessor(
     // moves), so it's safe to read fresh from touchDown/touchDragged/
     // touchUp without PlayScreen needing to push updates.
     private val planetCenter: Vector2,
+    // Sept 2026 session - see the class doc comment's "Horizon geometry
+    // corrected" paragraph: needed to compute the true tangent-to-sphere
+    // grazing angle instead of assuming the launcher stands exactly on
+    // the surface.
+    private val planetRadius: Float,
     private val viewport: Viewport,
     private val powerScale: Float,
     private val maxSpeed: Float,
@@ -209,29 +231,53 @@ class SlingshotInputProcessor(
         return Vector2(velocity).rotateRad(angleErrorRadians).scl(speedErrorFactor)
     }
 
-    /** True if [velocity], fired from [origin], points below [origin]'s own local horizon - see [clampAboveHorizon]. */
+    /**
+     * The sine of the true grazing angle between [origin]'s local horizon
+     * (the flat plane perpendicular to straight-out-from-[planetCenter])
+     * and the actual tangent line to the sphere of radius [planetRadius] -
+     * see the class doc comment's "Horizon geometry corrected" paragraph.
+     * Right triangle: hypotenuse = distance from [planetCenter] to
+     * [origin], opposite side = [planetRadius], so sin(angle) = opposite/
+     * hypotenuse. Zero when [origin] sits exactly on the surface (no
+     * clearance - reduces to the old flat-plane behavior); grows toward 1
+     * the higher [origin] stands above it.
+     */
+    private fun horizonSinThreshold(origin: Vector2): Float {
+        val distance = origin.dst(planetCenter)
+        return (planetRadius / distance).coerceIn(0f, 1f)
+    }
+
+    /** True if [velocity], fired from [origin], would fly into the sphere centered at [planetCenter] - see [clampAboveHorizon]. */
     private fun isBelowHorizon(origin: Vector2, velocity: Vector2): Boolean {
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
-        return velocity.dot(radialOutward) < 0f
+        val direction = Vector2(velocity).nor()
+        val sinThreshold = horizonSinThreshold(origin)
+        val cosThreshold = sqrt(1f - sinThreshold * sinThreshold)
+        return direction.dot(radialOutward) < -cosThreshold
     }
 
     /**
      * Mirrors [AiTurnController]'s own private copy of this same logic
      * exactly (that class needs its own since it clamps many hypothetical
      * candidates, not one live drag) - see this class's doc comment's
-     * "Horizon restriction" paragraph. Leaves [velocity] untouched if it's
-     * already legal; otherwise levels it off to skim exactly along
-     * [origin]'s local horizon, same speed, keeping whichever side
-     * (left/right along the horizon) the illegal direction was leaning
-     * toward rather than snapping to one fixed side.
+     * "Horizon restriction" and "Horizon geometry corrected" paragraphs.
+     * Leaves [velocity] untouched if it's already legal; otherwise levels
+     * it off to skim exactly along the true tangent-to-sphere grazing
+     * line (not the flat horizon plane), same speed, keeping whichever
+     * side (left/right) the illegal direction was leaning toward rather
+     * than snapping to one fixed side.
      */
     private fun clampAboveHorizon(origin: Vector2, velocity: Vector2): Vector2 {
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
-        if (velocity.dot(radialOutward) >= 0f) return velocity
+        val direction = Vector2(velocity).nor()
+        val sinThreshold = horizonSinThreshold(origin)
+        val cosThreshold = sqrt(1f - sinThreshold * sinThreshold)
+        if (direction.dot(radialOutward) >= -cosThreshold) return velocity
         val speed = velocity.len()
         val tangentA = Vector2(-radialOutward.y, radialOutward.x)
         val tangentB = Vector2(radialOutward.y, -radialOutward.x)
-        val tangent = if (velocity.dot(tangentA) >= velocity.dot(tangentB)) tangentA else tangentB
-        return tangent.nor().scl(speed)
+        val tangent = if (direction.dot(tangentA) >= direction.dot(tangentB)) tangentA else tangentB
+        val grazing = Vector2(tangent).scl(sinThreshold).add(Vector2(radialOutward).scl(-cosThreshold))
+        return grazing.nor().scl(speed)
     }
 }

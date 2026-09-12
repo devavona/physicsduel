@@ -4,6 +4,7 @@ import com.badlogic.gdx.Gdx
 import com.badlogic.gdx.math.MathUtils
 import com.badlogic.gdx.math.Vector2
 import kotlin.math.atan2
+import kotlin.math.sqrt
 
 /**
  * Phase 12's minimal AI opponent, extended in Phase 14 with repositioning
@@ -395,25 +396,51 @@ class AiTurnController(
      * restriction added to [SlingshotInputProcessor] for the player -
      * that class has its own private copy of this exact logic, since it
      * clamps one live drag rather than many hypothetical candidates).
-     * Leaves [velocity] untouched if it already points above [origin]'s
-     * own local horizon (the tangent line perpendicular to
-     * straight-out-from-[planetCenter] at that position); otherwise
-     * levels it off to skim exactly along that horizon, same speed,
-     * keeping whichever side (left/right along the horizon) the illegal
-     * direction was leaning toward rather than snapping to one fixed
-     * side. Applied inside [bestAimFor] itself (every candidate, for both
-     * [searchAim] and [reposition]) and again in [searchAim] after
-     * [applyAimError], since that jitter's random rotation could
-     * otherwise nudge an exactly-on-horizon shot back below it.
+     * Leaves [velocity] untouched if it already points above the true
+     * tangent-to-sphere grazing line for [origin]; otherwise levels it
+     * off to skim exactly along that line, same speed, keeping whichever
+     * side (left/right) the illegal direction was leaning toward rather
+     * than snapping to one fixed side. Applied inside [bestAimFor] itself
+     * (every candidate, for both [searchAim] and [reposition]) and again
+     * in [searchAim] after [applyAimError], since that jitter's random
+     * rotation could otherwise nudge an exactly-grazing shot back past it.
+     *
+     * **Horizon geometry corrected (Sept 2026 session, later in the same
+     * pass).** Originally checked only the flat plane perpendicular to
+     * straight-out-from-[planetCenter] at [origin] - correct only if
+     * [origin] sat exactly on the surface. Every [origin] this class ever
+     * passes here actually stands [heightAboveSurface] above it (see
+     * [positionAt]), so the sphere's real curve falls away below that flat
+     * plane - see [horizonSinThreshold] and [SlingshotInputProcessor]'s
+     * matching fix (Boo, on-device, about the player's red aim-preview
+     * dots: "note how the red dots appear even though the aim is not
+     * through the planet" - the exact same flat-plane bug, here too).
      */
     private fun clampAboveHorizon(origin: Vector2, velocity: Vector2): Vector2 {
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
-        if (velocity.dot(radialOutward) >= 0f) return velocity
+        val direction = Vector2(velocity).nor()
+        val sinThreshold = horizonSinThreshold(origin)
+        val cosThreshold = sqrt(1f - sinThreshold * sinThreshold)
+        if (direction.dot(radialOutward) >= -cosThreshold) return velocity
         val speed = velocity.len()
         val tangentA = Vector2(-radialOutward.y, radialOutward.x)
         val tangentB = Vector2(radialOutward.y, -radialOutward.x)
-        val tangent = if (velocity.dot(tangentA) >= velocity.dot(tangentB)) tangentA else tangentB
-        return tangent.nor().scl(speed)
+        val tangent = if (direction.dot(tangentA) >= direction.dot(tangentB)) tangentA else tangentB
+        val grazing = Vector2(tangent).scl(sinThreshold).add(Vector2(radialOutward).scl(-cosThreshold))
+        return grazing.nor().scl(speed)
+    }
+
+    /**
+     * The sine of the true grazing angle between [origin]'s flat local
+     * horizon and the actual tangent line to the sphere of radius
+     * [planetRadius] centered at [planetCenter] - see
+     * [clampAboveHorizon]'s "Horizon geometry corrected" paragraph. Right
+     * triangle: hypotenuse = distance from [planetCenter] to [origin],
+     * opposite side = [planetRadius].
+     */
+    private fun horizonSinThreshold(origin: Vector2): Float {
+        val distance = origin.dst(planetCenter)
+        return (planetRadius / distance).coerceIn(0f, 1f)
     }
 
     /**
