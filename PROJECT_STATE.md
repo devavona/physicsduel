@@ -3318,6 +3318,47 @@ of reusing/re-tinting the same 10 finished sprites.
    it if it does, since a matching Kenney star sprite is an easy
    follow-up if Boo wants to grab the Space Kit/Simple Space pack too.
 
+### Phase 26 addendum: removed the debug wireframes on the star + both planets
+
+Boo, right after seeing the new art on-device: "I want to remove the
+green circles around the planets and sun." `Box2DDebugRenderer` colors
+every body's wireframe by Box2D body type - static bodies (the star and
+both planets, all three permanently motionless gravity sources) draw
+green; that's exactly what Boo meant, not the avatar/AI target
+(kinematic, blue) or missiles (dynamic, red/pink), which he didn't
+mention and this leaves untouched. This is precisely the "future step"
+Phase 18's own doc comment flagged at the time ("hiding the wireframes
+for just these three bodies... needs a small deliberate change, not a
+one-line toggle") - now that all three have had real sprite art since
+Phase 18/26 with alignment already confirmed on-device, there's nothing
+left for their wireframes to verify.
+
+**What's built:** `Box2DDebugRenderer` has no built-in per-body filter,
+but its `renderBody(Body)` method is `protected`, not `private` -
+confirmed directly against libGDX's own source
+(`extensions/gdx-box2d/gdx-box2d/src/.../Box2DDebugRenderer.java`) rather
+than assumed, including which color each body type actually draws
+(`SHAPE_STATIC` = green, matching the star/both planets exactly).
+`debugRenderer` is now constructed as a small anonymous subclass whose
+overridden `renderBody` returns early for exactly `starBody`/
+`launchPlanetBody`/`targetPlanetBody` (three new direct `Body` fields,
+same pattern as the existing `avatarBody`/`targetCharacterBody` fields -
+`createStar()`/`createPlanet(...)`'s return values are now captured into
+these instead of being used inline) and otherwise falls through to
+`super.renderBody(body)` unchanged - every other body (avatar, AI
+target, missiles, strays) still gets its usual debug wireframe exactly
+as before.
+
+#### How to test the Phase 26 addendum on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Confirm the star and both planets no longer show a green wireframe
+   circle - just the sprite art itself.
+3. Confirm the avatar, AI target, and any in-flight missile still show
+   their usual debug wireframe outline (blue for the characters,
+   red/pink for missiles) - unaffected, since only the three green
+   (static-body) wireframes were targeted.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
