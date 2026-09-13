@@ -187,6 +187,25 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // hits something resolves immediately regardless of this timer.
         private const val FIELD_EXIT_TURN_END_SECONDS = 3f
 
+        // Sept 2026 session - Boo, on-device: a shot flew a perfectly
+        // stable orbit, never hit anything, and never left the play field
+        // either, so neither resolution path above ever fired and the turn
+        // just sat there frozen forever - "the shot, if it goes into a
+        // stable orbit inside the field of view, should time out at some
+        // point." This reverses an earlier explicit call from Phase 25
+        // ("i dont care about something getting in a stable orbit" - no
+        // failsafe timer) now that Boo's actually hit the stuck-forever
+        // case in practice. A hard ceiling on how long ANY shot gets to
+        // stay unresolved, regardless of where it is - in-field or out -
+        // see the per-frame check in render() for how this and
+        // FIELD_EXIT_TURN_END_SECONDS combine (whichever timer trips
+        // first wins). Deliberately generous - GravitySystem's own doc
+        // comment describes orbital periods as "multi-second," so this
+        // needs enough headroom that a shot genuinely still working its
+        // way toward a hit or a field exit doesn't get cut off early;
+        // tune up if a legitimate shot ever gets timed out this way.
+        private const val MAX_SHOT_FLIGHT_SECONDS = 15f
+
         // Sept 2026 session - Boo: "each player can have 4 stray shots for
         // a total of 8. and agreed on the oldest is quietly retired if a
         // cap is reached and a new shot misses." The two sides' caps are
@@ -485,33 +504,36 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // Sept 2026 session - replaces the old shotFlightFreezeRemaining flat
     // timer. See FIELD_EXIT_TURN_END_SECONDS's doc comment for the full
     // design. [shotResolved] is false from the instant fireMissile() spawns
-    // anything until that shot is resolved one of two ways: it hits
+    // anything until that shot is resolved one of three ways: it hits
     // something ([activeShotEntity] gets removed from the engine by
     // [ProjectileContactListener]'s flushRemovals - checked in render() via
-    // [engineHasEntity]), or it has been continuously outside the play
-    // field for [FIELD_EXIT_TURN_END_SECONDS] (tracked by
+    // [engineHasEntity]), it has been continuously outside the play field
+    // for [FIELD_EXIT_TURN_END_SECONDS] (tracked by
     // [activeShotOutsideFieldSeconds], reset to 0 any frame it's back
-    // inside). [activeShotSide] records which side fired it purely so a
-    // field-exit resolution knows which side's stray list ([playerStrays]/
-    // [aiStrays]) to add it to. While !shotResolved, neither turn-handoff
-    // callback below (AvatarMovementController's onTurnPassed,
-    // AiTurnController's onTurnComplete) performs its handoff immediately -
-    // each instead stashes the action it would have run in
-    // [pendingTurnHandoff], and render() fires it the instant the shot
-    // resolves. Only ever one active shot/pending handoff at a time - by
-    // construction, nothing can trigger a second turn transition while a
-    // shot is still unresolved. No failsafe timer for a shot that never
-    // resolves either way (e.g. a stable orbit) - Boo, explicit: "i dont
-    // care about something getting in a stable orbit."
+    // inside), or it's simply been alive too long regardless of where it
+    // is (tracked by [activeShotElapsedSeconds] against
+    // [MAX_SHOT_FLIGHT_SECONDS] - see that constant's doc comment for the
+    // stable-orbit bug this backstops). [activeShotSide] records which
+    // side fired it purely so either timeout-based resolution knows which
+    // side's stray list ([playerStrays]/[aiStrays]) to add it to. While
+    // !shotResolved, neither turn-handoff callback below
+    // (AvatarMovementController's onTurnPassed, AiTurnController's
+    // onTurnComplete) performs its handoff immediately - each instead
+    // stashes the action it would have run in [pendingTurnHandoff], and
+    // render() fires it the instant the shot resolves. Only ever one
+    // active shot/pending handoff at a time - by construction, nothing can
+    // trigger a second turn transition while a shot is still unresolved.
     private var shotResolved = true
     private var activeShotEntity: Entity? = null
     private var activeShotSide: Side? = null
     private var activeShotOutsideFieldSeconds = 0f
+    private var activeShotElapsedSeconds = 0f
     private var pendingTurnHandoff: (() -> Unit)? = null
 
     // Sept 2026 session - a shot that resolved via the field-exit timeout
-    // above (rather than an impact) isn't destroyed - it's added here
-    // instead, and keeps existing/simulating/dealing real damage
+    // or the MAX_SHOT_FLIGHT_SECONDS backstop above (rather than an
+    // impact) isn't destroyed - it's added here instead, and keeps
+    // existing/simulating/dealing real damage
     // indefinitely (still GravityAffectedComponent/ProjectileComponent-
     // tagged, still watched by ProjectileContactListener same as any other
     // projectile) until it eventually hits something or is evicted to make
@@ -1203,6 +1225,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         activeShotEntity = entity
         activeShotSide = side
         activeShotOutsideFieldSeconds = 0f
+        activeShotElapsedSeconds = 0f
 
         return entity
     }
@@ -1240,8 +1263,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     /**
      * Sept 2026 session - called from render() the instant [activeShotEntity]
      * is found resolved, either via impact (already destroyed by
-     * [ProjectileContactListener]) or a field-exit timeout (handled by the
-     * caller via [addStray] before calling this). Fires whatever handoff
+     * [ProjectileContactListener]) or a timeout - field-exit or the
+     * [MAX_SHOT_FLIGHT_SECONDS] backstop - (handled by the caller via
+     * [addStray] before calling this). Fires whatever handoff
      * had been stashed in [pendingTurnHandoff] - see [shotResolved]'s doc
      * comment - or, if the turn hasn't actually been passed yet (the
      * player can still be mid post-shot repositioning when a shot resolves
@@ -1254,6 +1278,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         activeShotEntity = null
         activeShotSide = null
         activeShotOutsideFieldSeconds = 0f
+        activeShotElapsedSeconds = 0f
         pendingTurnHandoff?.invoke()
         pendingTurnHandoff = null
     }
@@ -1387,16 +1412,29 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             if (entity == null || !engineHasEntity(entity)) {
                 resolveActiveShot()
             } else {
+                activeShotElapsedSeconds += delta
                 val position = physicsBodyMapper.get(entity).body.position
                 val outsideField = position.x < 0f || position.x > WORLD_WIDTH || position.y < 0f || position.y > WORLD_HEIGHT
                 if (outsideField) {
                     activeShotOutsideFieldSeconds += delta
-                    if (activeShotOutsideFieldSeconds >= FIELD_EXIT_TURN_END_SECONDS) {
-                        activeShotSide?.let { addStray(it, entity) }
-                        resolveActiveShot()
-                    }
                 } else {
                     activeShotOutsideFieldSeconds = 0f
+                }
+                // Sept 2026 session - either timer can force this shot to
+                // resolve: it's been outside the field too long, or (see
+                // MAX_SHOT_FLIGHT_SECONDS's doc comment) it's just been
+                // alive too long regardless of where it is - a stable
+                // orbit inside the field satisfies neither the impact
+                // check above nor the field-exit timer, so without this it
+                // would never resolve at all. Either way it becomes a
+                // stray rather than being destroyed outright - same "it
+                // absolutely can still cause damage" treatment as a
+                // field-exit resolution, just triggered by a different cause.
+                if (activeShotOutsideFieldSeconds >= FIELD_EXIT_TURN_END_SECONDS ||
+                    activeShotElapsedSeconds >= MAX_SHOT_FLIGHT_SECONDS
+                ) {
+                    activeShotSide?.let { addStray(it, entity) }
+                    resolveActiveShot()
                 }
             }
         }

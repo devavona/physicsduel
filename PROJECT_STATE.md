@@ -3632,6 +3632,55 @@ as a parameter, not re-fetched per candidate or per simulated step), and
    to be - confirm it flies through cleanly, matching what the preview
    now shows.
 
+## Stable-orbit shot could freeze the game forever - fixed
+
+Boo, on-device: "I made a shot and it perfectly went into an orbit not
+hitting anything. the game dosnt recognize this and things the turn is
+still going on. the shot, if it goes into a stable orbit inside the
+field of view, should time out at some point." This reverses an
+explicit call from Phase 25 ("i dont care about something getting in a
+stable orbit" - no failsafe timer, at the time) now that the actual
+stuck-forever case showed up in real play.
+
+**The bug.** `shotResolved` (see that field's doc comment) only ever
+had two ways to become true again: the shot hits something, or it's
+been continuously outside the play field for `FIELD_EXIT_TURN_END_SECONDS`
+(3s). A shot that curves into a genuinely stable orbit - never touching
+anything, never crossing the field boundary - satisfies neither
+condition, so `shotResolved` just stays false forever and the turn
+never hands off. Nothing was broken about the physics; the turn-
+resolution logic simply had no path out of this specific case.
+
+**Fix.** New `MAX_SHOT_FLIGHT_SECONDS` (15f, generous on purpose - see
+its own doc comment on why: `GravitySystem` describes orbital periods
+as "multi-second," so this needs real headroom before it risks cutting
+off a shot that's still legitimately working toward a hit or a field
+exit) is a hard ceiling on how long ANY shot gets to stay unresolved,
+tracked by a new `activeShotElapsedSeconds` that counts up regardless
+of whether the shot is inside or outside the field. The per-frame check
+in `render()` now resolves the turn the instant EITHER timer trips -
+field-exit or max-flight-time, whichever comes first - and treats both
+the same way: the shot becomes a stray (`addStray`, same per-side cap
+and "it can still cause damage later" behavior Phase 25 already built)
+rather than being destroyed outright, so a timed-out orbiter doesn't
+just vanish - it keeps existing and can still hit something down the
+line, same as any other stray.
+
+#### How to test this fix on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Try to reproduce a stable orbit (a light tap near the star at a
+   grazing angle is usually what does it) - confirm that after about 15
+   seconds, even with the shot never hitting anything and never leaving
+   the field, the turn hands off on its own instead of staying frozen.
+3. Confirm the now-timed-out shot doesn't just disappear - it should
+   keep existing/orbiting and still be able to deal damage later, same
+   as a shot that went stray by leaving the field.
+4. General play: confirm normal shots that resolve quickly (hit
+   something, or exit the field within a couple seconds) are completely
+   unaffected - this only ever kicks in after 15 real seconds of an
+   unresolved shot.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
