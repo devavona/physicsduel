@@ -28,7 +28,9 @@ import com.badlogic.gdx.physics.box2d.FixtureDef
 import com.badlogic.gdx.physics.box2d.World
 import com.badlogic.gdx.utils.viewport.ExtendViewport
 import com.badlogic.gdx.utils.viewport.Viewport
+import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -218,10 +220,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // a principled starting point (an object moving exactly that fast,
         // exactly tangent to its radius, traces a circle given only the
         // star's own pull), not a promise of a real stable orbit once the
-        // surviving planet's own gravity also comes into play. 1f is a
-        // starting guess, tunable like every other illustrative constant
-        // in this companion object.
-        private const val ORBITAL_DRIFT_SPEED_FRACTION = 1f
+        // surviving planet's own gravity also comes into play.
+        //
+        // First on-device test: Boo, "the angular velocity of the ai...is
+        // not realistic...it should be at a much slower speed" - a full
+        // circular-orbit speed looked far too fast for what's meant to read
+        // as a knocked-loose drift, not a launch. Dropped from 1f to 0.2f
+        // (a fifth of that speed) - still just a starting guess, tune
+        // further if it's still too fast/slow on-device.
+        private const val ORBITAL_DRIFT_SPEED_FRACTION = 0.2f
 
         // Sept 2026 session - "landing" on a surviving planet/moon while
         // drifting deals a small, fixed knock rather than anything
@@ -1384,21 +1391,65 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Sept 2026 session - orbital drift's initial "flung into orbit" kick
-     * speed, shared by [beginPlayerDrift]/[beginAiDrift] - see
-     * ORBITAL_DRIFT_SPEED_FRACTION's doc comment for the reasoning. The
-     * direction is always the counterclockwise tangent to the radius from
-     * the star to [position] - arbitrary (nothing about this game's layout
-     * demands one rotation direction over the other) but fixed, so a
-     * player drift and an AI drift always behave the same way.
+     * Sept 2026 session - orbital drift's initial "flung into orbit" kick,
+     * shared by [beginPlayerDrift]/[beginAiDrift]. Speed is a fraction of
+     * the true circular-orbit speed around the star at [characterPosition]'s
+     * radius - see ORBITAL_DRIFT_SPEED_FRACTION's doc comment.
+     *
+     * **Direction (revised after first on-device test).** Boo, on the
+     * original always-the-same-rotational-sense kick: "the angular velocity
+     * of the ai...is not realistic" - the direction needs to depend on
+     * *where the destroying shot actually hit*, not be arbitrary. Confirmed
+     * design, from worked clock-position examples (character standing at
+     * 12:00 on the planet): a shot landing at 3:00 flings the character
+     * left (the short way around from 3:00 to 12:00 is counterclockwise);
+     * a shot at 11:00 flings it right, toward 3:00 (the short way from
+     * 11:00 to 12:00 is clockwise); a shot at 6:00 - directly opposite -
+     * flings it straight up (no "short way" when both ways are equal, so
+     * no rotational component at all, just straight out).
+     *
+     * Modeled as a shockwave traveling from [impactPosition] around
+     * [planetCenter]'s circle to [characterPosition], continuing tangentially
+     * in whichever rotational sense (clockwise/counterclockwise) got it
+     * there the *shorter* way - `sin(characterAngle - impactAngle)` is
+     * positive for the counterclockwise-is-shorter case, negative for
+     * clockwise, and (very close to) zero exactly when the impact is
+     * essentially opposite the character (or, in principle, coincident
+     * with it) - the degenerate case with no clear rotational sense, where
+     * this falls back to pure radial-outward instead of picking an
+     * arbitrary side. [impactPosition] is null only if a planet somehow
+     * destructed without ever recording a hit (shouldn't happen in
+     * practice - [GravitySourceComponent.applyDamage] always records one);
+     * radial-outward is the safe fallback there too.
      */
-    private fun driftKickVelocity(position: Vector2): Vector2 {
-        val radialFromStar = Vector2(position).sub(STAR_X, STAR_Y)
+    private fun driftKickVelocity(characterPosition: Vector2, planetCenter: Vector2, impactPosition: Vector2?): Vector2 {
+        val radialOutward = Vector2(characterPosition).sub(planetCenter).nor()
+        val direction = if (impactPosition == null) {
+            radialOutward
+        } else {
+            val characterAngleRadians = atan2(radialOutward.y, radialOutward.x)
+            val impactRadial = Vector2(impactPosition).sub(planetCenter)
+            val impactAngleRadians = atan2(impactRadial.y, impactRadial.x)
+            var angularDiffRadians = characterAngleRadians - impactAngleRadians
+            while (angularDiffRadians > MathUtils.PI) angularDiffRadians -= MathUtils.PI2
+            while (angularDiffRadians <= -MathUtils.PI) angularDiffRadians += MathUtils.PI2
+            val sinDiff = sin(angularDiffRadians)
+            when {
+                // Impact essentially opposite (or, in principle, coincident
+                // with) the character - no clear "shorter way around", so
+                // no rotational sense to continue. A tiny band, not exactly
+                // zero, since a real impact angle almost never lands on
+                // precisely +-180 degrees.
+                abs(sinDiff) < 0.05f -> radialOutward
+                sinDiff > 0f -> Vector2(-radialOutward.y, radialOutward.x) // counterclockwise tangent - shorter way was CCW
+                else -> Vector2(radialOutward.y, -radialOutward.x) // clockwise tangent - shorter way was CW
+            }
+        }
+
+        val radialFromStar = Vector2(characterPosition).sub(STAR_X, STAR_Y)
         val distanceFromStar = radialFromStar.len().coerceAtLeast(GravitySystem.MIN_DISTANCE)
-        radialFromStar.nor()
-        val tangent = Vector2(-radialFromStar.y, radialFromStar.x)
         val orbitSpeed = sqrt(GravitySystem.G * gravitySystem.gravityMultiplier * STAR_MASS / distanceFromStar)
-        return tangent.scl(orbitSpeed * ORBITAL_DRIFT_SPEED_FRACTION)
+        return direction.scl(orbitSpeed * ORBITAL_DRIFT_SPEED_FRACTION)
     }
 
     /**
@@ -1428,7 +1479,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         for (fixture in avatarBody.fixtureList) fixture.density = 1f
         avatarBody.resetMassData()
         avatarEntity.add(GravityAffectedComponent())
-        avatarBody.linearVelocity = driftKickVelocity(avatarBody.position)
+        avatarBody.linearVelocity = driftKickVelocity(avatarBody.position, launchPlanetPosition, gravitySourceMapper.get(launchPlanetEntity).lastImpactPosition)
         avatarMovementController.beginDrift { physicsBodyMapper.get(avatarEntity).body.position }
         slingshotInputProcessor.horizonRestrictionEnabled = false
         playerDrifting = true
@@ -1440,7 +1491,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         for (fixture in targetCharacterBody.fixtureList) fixture.density = 1f
         targetCharacterBody.resetMassData()
         targetCharacterEntity.add(GravityAffectedComponent())
-        targetCharacterBody.linearVelocity = driftKickVelocity(targetCharacterBody.position)
+        targetCharacterBody.linearVelocity = driftKickVelocity(targetCharacterBody.position, targetPlanetPosition, gravitySourceMapper.get(targetPlanetEntity).lastImpactPosition)
         aiTurnController.beginDrift { physicsBodyMapper.get(targetCharacterEntity).body.position }
         aiDrifting = true
     }

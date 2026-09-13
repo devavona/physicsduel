@@ -6,6 +6,7 @@ import com.badlogic.ashley.core.Entity
 import com.badlogic.ashley.core.Family
 import com.badlogic.ashley.utils.ImmutableArray
 import com.badlogic.gdx.Gdx
+import com.badlogic.gdx.math.Vector2
 import com.badlogic.gdx.physics.box2d.Body
 import com.badlogic.gdx.physics.box2d.Contact
 import com.badlogic.gdx.physics.box2d.ContactImpulse
@@ -91,10 +92,15 @@ class ProjectileContactListener(private val engine: Engine) : ContactListener {
         queueForRemoval(projectile)
 
         val target = findBodyEntity(otherBody) ?: return
-        applyDamageIfApplicable(target)
+        // Sept 2026 session - projectileBody.position, captured here while
+        // it's still valid (this body is only queued for removal above, not
+        // actually destroyed until flushRemovals runs later this frame), is
+        // exactly the impact point orbital drift needs - see
+        // GravitySourceComponent.lastImpactPosition's doc comment.
+        applyDamageIfApplicable(target, impactPosition = projectileBody.position)
     }
 
-    private fun applyDamageIfApplicable(target: Entity) {
+    private fun applyDamageIfApplicable(target: Entity, impactPosition: Vector2) {
         healthMapper.get(target)?.let { health ->
             health.applyDamage(MISSILE_DAMAGE)
             Gdx.app.log("ProjectileContactListener", "Hit - ${health.currentHp}/${health.maxHp} HP remaining")
@@ -106,7 +112,7 @@ class ProjectileContactListener(private val engine: Engine) : ContactListener {
 
         gravitySourceMapper.get(target)?.let { source ->
             if (!source.isDamageable) return@let
-            source.applyDamage(CELESTIAL_MASS_DAMAGE)
+            source.applyDamage(CELESTIAL_MASS_DAMAGE, impactPosition)
             Gdx.app.log("ProjectileContactListener", "Celestial body hit - mass now ${source.mass}")
             if (source.isDestroyed) {
                 Gdx.app.log("ProjectileContactListener", "Celestial body destroyed - gravity well removed")

@@ -3830,8 +3830,74 @@ would need real design/scoping of its own - flagging it here rather than
 quietly leaving it unhandled.
 
 Other tunables introduced this phase, both illustrative/not tuned yet:
-`ORBITAL_DRIFT_SPEED_FRACTION` (1f) and `ORBITAL_DRIFT_LANDING_DAMAGE` (1),
-both in `PlayScreen`'s companion object.
+`ORBITAL_DRIFT_SPEED_FRACTION` (now 0.2f - see the fix below) and
+`ORBITAL_DRIFT_LANDING_DAMAGE` (1), both in `PlayScreen`'s companion object.
+
+### Kick speed and direction fixed after first on-device test
+
+Boo's on-device feedback right after the phase above first landed: "the
+angular velocity of the ai when planet is gone is not realistic...the ai
+speeds off in an orbit of the sun...it should be at a much slower speed"
+- and, separately, the direction itself was wrong: it always used the
+same fixed counterclockwise-tangent-around-the-star direction regardless
+of anything about the actual destruction, which isn't how a shockwave
+from a specific impact point would actually fling someone standing
+elsewhere on the surface.
+
+**Speed.** `ORBITAL_DRIFT_SPEED_FRACTION` dropped from `1f` (a full
+circular-orbit speed) to `0.2f` (a fifth of that) - still an illustrative
+starting guess, easy to tune further.
+
+**Direction.** Boo gave three worked clock-position examples to pin down
+the intended physics (character always at 12:00 on the planet): a shot
+hitting at 3:00 flings the character left; a shot at 11:00 flings it
+right (toward 3:00); a shot at 6:00 - directly opposite the character -
+flings it straight up. The pattern: a shockwave travels from the impact
+point around the surface to the character, continuing tangentially in
+whichever rotational direction (clockwise/counterclockwise) got there
+the *shorter* way; when the impact is exactly opposite (both ways
+equally short), there's no rotational sense to continue, so it's flung
+straight out radially instead. All three of Boo's examples check out
+exactly against this rule.
+
+**Implementation** needed a new piece of state that didn't exist before:
+*where* a planet's finishing blow actually landed.
+- `GravitySourceComponent` (`Components.kt`) gained `lastImpactPosition`
+  (null until first hit, overwritten on every hit - so once a source is
+  `isDestroyed`, this is exactly the finishing blow's impact point).
+  `applyDamage` gained an optional `impactPosition` parameter (defaults
+  to `null`, so every other, unrelated caller is unaffected) that records
+  it.
+- `ProjectileContactListener.handleProjectileHit` now passes the
+  missile's own Box2D body position (still valid at that point in
+  `beginContact` - the body isn't actually destroyed until `flushRemovals`
+  runs later that frame) through to `applyDamageIfApplicable`, which
+  forwards it into `GravitySourceComponent.applyDamage` for a celestial
+  hit.
+- `PlayScreen.driftKickVelocity` now takes the character's position, the
+  planet's center, and that recorded impact position (nullable - falls
+  back to pure radial-outward in the unlikely case none was ever
+  recorded), computes the angular difference between the character's
+  angle and the impact's angle around the planet's center, and picks the
+  counterclockwise tangent, the clockwise tangent, or (within a small
+  band around exactly +-180 degrees, using `sin` of that angular
+  difference) pure radial-outward, exactly matching the rule above.
+
+#### How to test this fix on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Repeat Phase 29's own on-device test (steps 2 and 7 below/above) and
+   confirm the drift speed now looks like a slow knocked-loose drift, not
+   a fast orbital launch.
+3. If possible, try to line up (or just observe over a few different
+   games) a destroying hit landing at roughly the "3 o'clock" and
+   "9 o'clock" position relative to wherever the character is currently
+   standing on that planet, and confirm the character launches off to
+   the correct side (away from the shorter arc to the impact) rather
+   than always the same direction regardless of where the hit landed.
+   Exact clock-position aiming isn't practical to force on-device, so
+   this is more "does it look directionally sensible" than a precise
+   check - flag it if it ever looks backwards or random.
 
 #### How to test this phase on-device
 

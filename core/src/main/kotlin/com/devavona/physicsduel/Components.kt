@@ -38,8 +38,24 @@ class GravitySourceComponent(val initialMass: Float, val isDamageable: Boolean =
     var mass: Float = initialMass
         private set
 
-    fun applyDamage(amount: Float) {
+    // Sept 2026 session - orbital drift's kick-direction fix. The world
+    // position of the most recent hit this source took (overwritten every
+    // hit, so once [isDestroyed] flips true this is exactly the finishing
+    // blow's impact point). Null until the first hit. Orbital drift reads
+    // this off a planet the instant it's destroyed to work out which way a
+    // shockwave from that final impact would fling a character standing
+    // elsewhere on the surface - see PlayScreen.driftKickVelocity's doc
+    // comment for the full reasoning (Boo, explicit, with worked clock-
+    // position examples: the character flings off tangentially, continuing
+    // whichever rotational direction is the *shorter* way from the impact
+    // point around to the character - or straight out radially in the
+    // degenerate case where the impact is exactly opposite).
+    var lastImpactPosition: Vector2? = null
+        private set
+
+    fun applyDamage(amount: Float, impactPosition: Vector2? = null) {
         mass = (mass - amount).coerceAtLeast(0f)
+        if (impactPosition != null) lastImpactPosition = Vector2(impactPosition)
     }
 
     val isDestroyed: Boolean get() = mass <= 0f
