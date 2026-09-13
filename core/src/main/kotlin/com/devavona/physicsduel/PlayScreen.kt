@@ -448,7 +448,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var cameraGestureController: CameraGestureController
     // Phase 16 - shared between aiTurnController's obstacle list and the
     // player's own aim preview (see renderAimTrajectoryPreview), so both
-    // read the same geometry instead of two copies that could drift.
+    // read the same geometry instead of two copies that could drift. Fixed
+    // geometry, built once at init{} - index 0 is always the star, 1 the
+    // launch planet, 2 the target planet (see the init{} construction
+    // site). Sept 2026 session - this fixed list alone is no longer what
+    // either consumer reads from; see [currentCelestialObstacles].
     private lateinit var celestialObstacles: List<AiTurnController.Obstacle>
     private lateinit var trajectorySimulator: TrajectorySimulator
 
@@ -795,11 +799,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // createTarget() below now seeds the body's position from
         // aiTurnController.position instead of a separately-hardcoded
         // formula. Shared with PlayScreen's own Phase 16 aim preview (see
-        // celestialObstacles) - fixed geometry (center + radius), not live
-        // Box2D references - see AiTurnController.Obstacle's doc comment;
-        // a destroyed planet (either one, now that both are damageable)
-        // still counts as an obstacle here, a known minor gap, not
-        // addressed this phase.
+        // renderAimTrajectoryPreview) - fixed geometry (center + radius),
+        // not live Box2D references - see AiTurnController.Obstacle's doc
+        // comment. Order matters: index 0 is always the star, 1 the launch
+        // planet, 2 the target planet - see currentCelestialObstacles,
+        // which is what both consumers actually read from now.
         celestialObstacles = listOf(
             AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
             AiTurnController.Obstacle(Vector2(launchPlanetPosition), PLANET_RADIUS),
@@ -816,7 +820,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             startAngleDegrees = AI_START_ANGLE_DEGREES,
             aimSpeed = MAX_MISSILE_SPEED,
             thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
-            obstacles = celestialObstacles,
+            obstacleSource = { currentCelestialObstacles() },
             aimSearch = AiTurnController.AimSearchConfig(
                 angleSearchDegrees = AI_AIM_ANGLE_SEARCH_DEGREES,
                 angleStepDegrees = AI_AIM_ANGLE_STEP_DEGREES,
@@ -1205,6 +1209,33 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     /** True if [entity] is still live in [engine] - see activeShotEntity's and addStray's doc comments for why this needs checking. */
     private fun engineHasEntity(entity: Entity): Boolean = engine.entities.any { it === entity }
+
+    /**
+     * Sept 2026 session - fixes a "ghost obstacle" bug: [celestialObstacles]
+     * is fixed geometry built once at init{} from wherever the star/planets
+     * happened to spawn, with no live link back to the actual Ashley
+     * entities/Box2D bodies. Once a planet is genuinely destroyed
+     * ([ProjectileContactListener.flushRemovals] tears down its real body
+     * and entity), the fixed list never noticed - the AI's own aim search
+     * ([AiTurnController.searchAim]/[reposition]) and the player's own
+     * [renderAimTrajectoryPreview] would both keep treating that planet's
+     * old position as solid ground forever, even though a real fired shot
+     * flies straight through it with nothing there to stop it. Called
+     * fresh wherever either consumer used to just read [celestialObstacles]
+     * directly, so a destroyed planet actually drops out the instant it's
+     * gone - relies on [celestialObstacles]'s fixed index order (0 = star,
+     * 1 = launch planet, 2 = target planet) to match each entry back to the
+     * right [GravitySourceComponent.isDestroyed] check. The star is never
+     * filtered - it's not damageable in the first place (see
+     * [GravitySourceComponent.isDamageable]).
+     */
+    private fun currentCelestialObstacles(): List<AiTurnController.Obstacle> {
+        val result = ArrayList<AiTurnController.Obstacle>(3)
+        result.add(celestialObstacles[0]) // the star - never destroyed
+        if (!gravitySourceMapper.get(launchPlanetEntity).isDestroyed) result.add(celestialObstacles[1])
+        if (!gravitySourceMapper.get(targetPlanetEntity).isDestroyed) result.add(celestialObstacles[2])
+        return result
+    }
 
     /**
      * Sept 2026 session - called from render() the instant [activeShotEntity]
@@ -1630,6 +1661,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         val sources = gravitySystem.currentSources()
         val multiplier = gravitySystem.gravityMultiplier
+        val obstacles = currentCelestialObstacles()
         val position = Vector2(launchPoint)
         val currentVelocity = Vector2(velocity)
         // Inverse of speedTuning - see AiTurnController.searchAim's
@@ -1661,7 +1693,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             // actually hit something, unchanged.
             if (!belowHorizon) {
                 var blocked = false
-                for (obstacle in celestialObstacles) {
+                for (obstacle in obstacles) {
                     if (position.dst(obstacle.center) <= obstacle.radius) {
                         blocked = true
                         break

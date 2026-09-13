@@ -74,7 +74,14 @@ class AiTurnController(
     startAngleDegrees: Float,
     private val aimSpeed: Float,
     private val thinkDelaySeconds: Float,
-    private val obstacles: List<Obstacle>,
+    // Sept 2026 session - a supplier, not a fixed List, so a planet
+    // destroyed mid-game actually drops out of the search's obstacle list
+    // instead of lingering forever as a "ghost" obstacle - see
+    // PlayScreen.currentCelestialObstacles's doc comment for the bug this
+    // fixes. Fetched once per searchAim/reposition call (same timing as
+    // gravitySources/gravityMultiplier below), not once per candidate or
+    // per simulated step.
+    private val obstacleSource: () -> List<Obstacle>,
     private val aimSearch: AimSearchConfig,
     // Phase 15 - the exact gravity math AiTurnController's own
     // trajectory simulation needs, mirrored from GravitySystem rather than
@@ -197,6 +204,7 @@ class AiTurnController(
     private fun reposition(target: Vector2) {
         val sources = gravitySources()
         val multiplier = gravityMultiplier()
+        val obstacles = obstacleSource()
         val speedTuning = shotSpeedMultiplier()
         val effectiveAimSpeed = aimSpeed * speedTuning
         val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
@@ -208,7 +216,7 @@ class AiTurnController(
             val candidateOrigin = positionAt(angle)
             val (_, approach) = bestAimFor(
                 candidateOrigin, angle * MathUtils.degreesToRadians, target,
-                sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
+                sources, multiplier, obstacles, effectiveAimSpeed, effectiveSimMaxSeconds
             )
             if (approach < idealApproach) {
                 idealApproach = approach
@@ -281,6 +289,7 @@ class AiTurnController(
     private fun searchAim(origin: Vector2, target: Vector2): Vector2 {
         val sources = gravitySources()
         val multiplier = gravityMultiplier()
+        val obstacles = obstacleSource()
         val speedTuning = shotSpeedMultiplier()
         val effectiveAimSpeed = aimSpeed * speedTuning
         // Inverse of speedTuning - a slower shot takes proportionally
@@ -291,7 +300,7 @@ class AiTurnController(
         val baseAngleRadians = angleDegrees * MathUtils.degreesToRadians
 
         val (bestVelocity, bestApproach) = bestAimFor(
-            origin, baseAngleRadians, target, sources, multiplier, effectiveAimSpeed, effectiveSimMaxSeconds
+            origin, baseAngleRadians, target, sources, multiplier, obstacles, effectiveAimSpeed, effectiveSimMaxSeconds
         )
         // clampAboveHorizon again here, after applyAimError - bestVelocity
         // is already legal (bestAimFor clamps every candidate), but the
@@ -360,6 +369,7 @@ class AiTurnController(
         target: Vector2,
         sources: List<Pair<Vector2, Float>>,
         multiplier: Float,
+        obstacles: List<Obstacle>,
         effectiveAimSpeed: Float,
         effectiveSimMaxSeconds: Float
     ): Pair<Vector2, Float> {
@@ -371,7 +381,7 @@ class AiTurnController(
         // in the first place: neither one can ever end up scoring or
         // firing an illegal angle for [origin]'s own planet.
         var bestVelocity = clampAboveHorizon(origin, Vector2(target).sub(origin).nor().scl(effectiveAimSpeed))
-        var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
+        var bestApproach = simulateClosestApproach(origin, bestVelocity, target, sources, multiplier, obstacles, effectiveSimMaxSeconds)
 
         val stepCount = (2 * aimSearch.angleSearchDegrees / aimSearch.angleStepDegrees).toInt()
         for (step in 0..stepCount) {
@@ -380,7 +390,7 @@ class AiTurnController(
             val direction = Vector2(MathUtils.cos(angleRadians), MathUtils.sin(angleRadians))
             for (speedMultiplier in aimSearch.speedMultipliers) {
                 val candidateVelocity = clampAboveHorizon(origin, Vector2(direction).scl(effectiveAimSpeed * speedMultiplier))
-                val approach = simulateClosestApproach(origin, candidateVelocity, target, sources, multiplier, effectiveSimMaxSeconds)
+                val approach = simulateClosestApproach(origin, candidateVelocity, target, sources, multiplier, obstacles, effectiveSimMaxSeconds)
                 if (approach < bestApproach) {
                     bestApproach = approach
                     bestVelocity = candidateVelocity
@@ -486,6 +496,7 @@ class AiTurnController(
         target: Vector2,
         sources: List<Pair<Vector2, Float>>,
         multiplier: Float,
+        obstacles: List<Obstacle>,
         simMaxSeconds: Float
     ): Float {
         val position = Vector2(origin)

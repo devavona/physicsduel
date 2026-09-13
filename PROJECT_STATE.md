@@ -3583,6 +3583,55 @@ move-then-shoot-then-done rule.
    25's stray-shot/camera-ease behavior (shots still resolve, camera
    still eases to whoever's turn is next).
 
+## Ghost-obstacle bug fixed (destroyed planets no longer block aim/AI search forever)
+
+A long-known, small gap - first flagged all the way back at Phase 14's
+original obstruction check ("it also doesn't yet account for the target
+planet being partially destroyed... a known minor gap") and never fixed
+since, because a whole planet getting destroyed mid-game was rare enough
+not to matter. Boo asked about it directly while reviewing the orbital-
+drift plan below, since drift would put a character floating right where
+this bug lives.
+
+**The bug.** `celestialObstacles` (`PlayScreen`) is a fixed list of
+`Obstacle(center, radius)` values built once at game start from wherever
+the star/planets landed - plain numbers, no live link back to the actual
+Ashley entity or Box2D body. Two things read it: the AI's own aim search
+(`AiTurnController.searchAim`/`reposition`, via `bestAimFor`/
+`simulateClosestApproach`) and the player's own gray trajectory preview
+(`renderAimTrajectoryPreview`) - both treat every entry as solid, un-
+passable ground. When a planet is actually destroyed, its real body/
+entity gets torn down (`ProjectileContactListener.flushRemovals`), but
+nothing ever touched the fixed list to match - so a destroyed planet kept
+blocking shots and aim previews forever, at a spot where a real fired
+missile would now fly straight through with nothing there to stop it.
+
+**Fix.** New `PlayScreen.currentCelestialObstacles()` rebuilds the list
+live every time it's needed, dropping a planet's entry the instant
+`GravitySourceComponent.isDestroyed` is true for it (the star is never
+filtered - it's `isDamageable = false`, can't be destroyed). Both
+consumers now call this instead of reading the fixed list directly:
+`AiTurnController`'s constructor took an `obstacleSource: () -> List<Obstacle>`
+supplier instead of a fixed `List<Obstacle>` (same pattern already used
+for `gravitySources`/`gravityMultiplier` - fetched once per `searchAim`/
+`reposition` call, threaded through `bestAimFor`/`simulateClosestApproach`
+as a parameter, not re-fetched per candidate or per simulated step), and
+`renderAimTrajectoryPreview` calls the new function directly.
+
+#### How to test this fix on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Destroy a planet (repeatedly hit it until `GravitySourceComponent.isDestroyed`)
+   and confirm your own gray aim preview no longer stops/hides as though
+   something solid is still there.
+3. Confirm the AI's shots/repositioning also stop avoiding that now-empty
+   space - watch a few of its turns after the destruction and check its
+   aim search doesn't look artificially constrained near the old planet's
+   position.
+4. Fire an actual shot straight through where the destroyed planet used
+   to be - confirm it flies through cleanly, matching what the preview
+   now shows.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
