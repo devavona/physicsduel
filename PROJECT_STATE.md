@@ -2885,7 +2885,7 @@ near the character doesn't accidentally cancel.
    aim line once the cancel is armed)? Not built - flagging as an easy
    follow-up if it feels too hidden.
 
-## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session, not yet built)
+## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session; turn order/fixed-squad now built, see Phase 30 below)
 
 Picked back up from the "escalation ladder" backlog item - the ladder's
 own design (see "Campaign progression ladder" above and Phase 23 below)
@@ -3033,13 +3033,15 @@ knobs now ("yes").
 
 **Still not decided - open threads for whenever they're picked back
 up:**
-- **Squad composition / AI behavior with multiple characters** - same
-  open item as flagged in the original "Campaign progression ladder"
-  design above, still open.
+- **Squad composition / AI behavior with multiple characters** - fixed
+  2-per-side squads and a placeholder AI-targeting rule are now built
+  (Phase 30, Step 1) - a real targeting heuristic and any squad-size
+  flexibility beyond fixed-2 are still open (Step 3 and beyond).
 - **Build order** for everything in this section - camera/pan-zoom
-  almost certainly needs to land first (see above), but the exact
-  phase sequencing hasn't been explicitly confirmed with Boo the way
-  the Phase 19-23 order was.
+  landed first as planned (Phase 24), and multi-character combat's
+  Step 1 (fixed squads + turn order, Phase 30) has now landed too; the
+  play-field-size cap and scattered/region-quota placement are still
+  unbuilt and unscheduled.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
@@ -3931,6 +3933,172 @@ exactly against this rule.
    destroyed should play exactly as before - this phase should be
    completely invisible until a planet actually dies with its character
    still alive.
+
+## Phase 30: multi-character combat, Step 1 (fixed 2-per-side squads, shared planet, whole-squad-then-whole-squad)
+
+Boo, after Phase 29 landed: "anything open?" -> chose "multi character"
+next over the other open backlog items. Before building, four design
+questions genuinely needed Boo's own call (not implementation-time
+judgment calls) - asked directly and confirmed:
+- **Scope:** fixed squad size first (2 per side), not a player-facing
+  squad-builder yet.
+- **Placement:** characters can share a planet (not "clustered nearby but
+  separate ground" or forced onto different planets).
+- **AI targeting with multiple player characters alive:** left to
+  implementation judgment ("not important yet - pick something
+  reasonable") - see the placeholder heuristic below, flagged for a real
+  pass in Step 3.
+- **Win condition:** a side loses only once *all* its characters are
+  defeated (last-man-standing), not when the first one falls.
+
+Given the size of the change (nearly every method in `PlayScreen.kt`
+assumed exactly one character per side), this was broken into three
+steps, confirmed with Boo before starting: **Step 1** (this phase) -
+replace the singular player/AI characters with fixed 2-per-side squads,
+sharing each side's existing one planet, whole-squad-then-whole-squad
+turn order in a fixed index sequence (no player-facing order picker
+yet). **Step 2** (not started) - a tap-to-choose UI for the player's own
+turn order within their squad. **Step 3** (not started) - a real AI
+targeting heuristic (lowest-current-HP proposed) plus an on-device
+polish pass for issues specific to sharing a planet (crowding, aim
+obstruction between teammates).
+
+**What's built.** `AvatarMovementController`/`AiTurnController` needed
+*zero* changes - both already took `planetCenter`/`startAngleDegrees` as
+independent constructor parameters and already exposed everything
+(`position`, `beginDrift`, `reanchor`, `onFired`/`startTurn`,
+`isTurnActive`, `stepsRemaining`) generically enough to just construct
+two of each. All of Step 1's work is in `PlayScreen.kt`:
+
+- **Per-character state.** New `PlayerCharacterState`/`AiCharacterState`
+  classes (nested in `PlayScreen`) each hold one character's `controller`,
+  Box2D `body`, ECS `entity`, and its own `drifting`/`driftResolved`/
+  `driftFrozenVelocity` (previously per-*side* fields, now per-character -
+  see the "orbital drift generalizes per-character" note below).
+  `playerCharacters`/`aiCharacters: List<...>` (fixed size
+  `CHARACTERS_PER_SIDE = 2`) replace the old singular
+  `avatarMovementController`/`avatarBody`/`avatarEntity` and
+  `aiTurnController`/`targetCharacterBody`/`targetCharacterEntity` fields
+  entirely.
+- **Shared planet, offset start angles.** Both characters on a side are
+  built with `Vector2(launchPlanetPosition)`/`Vector2(targetPlanetPosition)`
+  as their `planetCenter` (two independent `Vector2` copies of the same
+  value - each can `reanchor()` independently later without affecting the
+  other), at `AVATAR_START_ANGLE_DEGREES`/`AI_START_ANGLE_DEGREES` ±
+  `CHARACTER_START_ANGLE_SPREAD_DEGREES` (20°) so they don't spawn
+  overlapping.
+- **Distinct collision categories per character.** New
+  `CATEGORY_PLAYER_AVATAR_2`/`CATEGORY_AI_TARGET_2` bits (alongside the
+  existing `CATEGORY_PLAYER_AVATAR`/`CATEGORY_AI_TARGET`) so each
+  character's own missile still only excludes colliding with *its own*
+  firer at spawn - a missile can still hit a teammate. Friendly fire on a
+  teammate was never explicitly ruled out, and the original single-
+  category design was only ever about the spawn-overlap glitch, so this
+  preserves that behavior rather than accidentally introducing a
+  friendly-fire-immunity side effect.
+- **Turn order: whole-squad-then-whole-squad, fixed index sequence.**
+  New `advanceAfterPlayerFired`/`advanceAfterAiFired` (called from each
+  character's own `onTurnPassed`/`onTurnComplete`) check whether a later,
+  still-living character on the *same* side hasn't acted yet this round;
+  if so, control passes to it (`activatePlayerCharacter`/
+  `activateAiCharacter` - same freeze-if-drifting/camera-snap/input-
+  routing work the old single-character `giveControlToPlayer`/
+  `startAiTurn` did, just parameterized per character now). Otherwise the
+  whole side's turn is over and it hands off to the other side's first
+  living character (`handOffToAi`/`handOffToPlayer` - the latter also
+  increments the new `roundNumber`, which replaces
+  `AvatarMovementController.turnNumber` as the HUD's turn counter now
+  that there are two independent per-character counters instead of one).
+  Input is restricted the instant *any* character fires (regardless of
+  who's next) to preserve the existing "only one shot in flight at a
+  time" invariant, and re-enabled the instant any player character
+  becomes active - `rebuildFullInputProcessor()` swaps which
+  `AvatarMovementController` instance is actually wired into
+  `fullInputProcessor` (only the active one should receive movement-
+  button taps; `SlingshotInputProcessor` stays a single shared instance
+  since `launchPoint` already gets `.set()` from whichever character is
+  active every frame, and both characters share one `planetCenter`
+  anyway).
+- **AI targeting placeholder (Step 1 only).** `activateAiCharacter`
+  always aims at the first living player character, by index - a
+  deliberate placeholder per Boo's "pick something reasonable," not the
+  real heuristic (lowest-HP, proposed for Step 3).
+- **Orbital drift generalizes per-character, not per-side.** Boo,
+  explicit: "characters can share a planet" - so when a shared planet is
+  destroyed, *every* living character standing on it starts drifting in
+  the same frame (a loop over each side's list in `render()`'s trigger
+  check), not just one. `beginPlayerDrift`/`beginAiDrift`,
+  `freezeDrift`/`thawDrift` (now single functions shared by both sides,
+  taking whichever body applies), and `checkPlayerDriftLanding`/
+  `checkAiDriftLanding` (built on a shared `resolveDriftLanding` helper)
+  are all now parameterized by character instead of assuming one. Each
+  character's own `driftResolved` flag means the "no second drift" known
+  limitation from Phase 29 is now scoped per-character rather than
+  per-side - unchanged in spirit, just per-character now.
+- **Win/loss check.** A side only loses once `playerCharacters.all { ...
+  isDefeated }` (or `aiCharacters.all { ... }`) - not the first character
+  to fall. This is the one genuinely new correctness wrinkle multi-
+  character combat introduces: since a single fallen character no longer
+  ends the run immediately, a defeated-but-not-yet-destroyed-this-frame
+  character's body can still be present mid-`render()` while its
+  surviving teammate keeps fighting - every per-character loop (position
+  sync, drift trigger/landing, sprite rendering) checks
+  `HealthComponent.isDefeated` *before* touching that character's Box2D
+  body, since `world.destroyBody` frees native memory and a defeated
+  character's body is destroyed by `ProjectileContactListener.flushRemovals`
+  the same frame it's confirmed dead. `HealthComponent` itself stays
+  safely readable after removal regardless (same pattern already relied
+  on for planet mass).
+- **HUD.** `renderStatsPanel` now shows one HP row per character (via a
+  small local `StatRow` list) instead of one per side - "Player 1 HP",
+  "Player 2 HP", "Target 1 HP", "Target 2 HP", plus both planets' mass
+  rows and a `Round N - P{1|2}: M left` / `AI's turn...` / `Shot in
+  flight...` turn label.
+
+**Not built this step (deliberately deferred):**
+- A player-facing turn-order-picker UI (Step 2) - order is a fixed
+  index sequence (character 0, then 1) for now.
+- A real AI-targeting heuristic (Step 3) - see the placeholder above.
+- Any polish specific to two characters sharing one planet - crowding,
+  an AI's aim search treating a teammate as an obstacle, visual overlap
+  at the two starting angles if `CHARACTER_START_ANGLE_SPREAD_DEGREES`
+  turns out too tight on-device. Flagged for Step 3, not fixed blind.
+- Characters are not added to `currentCelestialObstacles()` - an AI's
+  shot can currently fly straight through a teammate/enemy character
+  without being blocked by it (same as it always could pass through
+  another character before this phase, just now more likely to matter
+  with two bodies per planet).
+
+#### How to test this phase on-device
+
+1. Sync Gradle, run on-device as usual. **This changes almost every
+   system in `PlayScreen.kt`, so build first and report any compile
+   errors before testing behavior** - this was hand-edited without a
+   Kotlin/Gradle toolchain available to verify it compiles.
+2. Confirm each side now shows two characters standing near each other
+   on their one shared planet, at slightly different angles, not
+   overlapping.
+3. Take your first character's turn (move + fire) and confirm control
+   passes to your *second* character immediately after your shot
+   resolves - not to the AI. Camera should snap to character 2, its own
+   movement budget should be fresh.
+4. Fire your second character's shot and confirm control now passes to
+   the AI (its first character acts, then its second, then back to your
+   first character - watch `roundNumber` increment in the HUD once a
+   full round completes).
+5. Defeat one of your characters (or one of the AI's) while its teammate
+   is still alive - confirm the game does NOT end, the defeated
+   character's sprite disappears, and its teammate keeps taking turns
+   normally. Confirm the HUD shows that character's row as "DEFEATED".
+6. Only once *both* of a side's characters are defeated should Game
+   Over trigger.
+7. Destroy a side's shared planet while both its characters are still
+   alive - confirm *both* characters visibly start drifting in the same
+   frame, not just one.
+8. General regression check: everything from Phase 29's own on-device
+   test script (freeze/thaw, no-horizon-restriction while drifting,
+   landing/re-anchoring, hitting the star) should still hold for
+   whichever character is currently drifting.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
