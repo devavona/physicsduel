@@ -28,6 +28,8 @@ import com.badlogic.gdx.physics.box2d.FixtureDef
 import com.badlogic.gdx.physics.box2d.World
 import com.badlogic.gdx.utils.viewport.ExtendViewport
 import com.badlogic.gdx.utils.viewport.Viewport
+import kotlin.math.atan2
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
@@ -205,6 +207,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // way toward a hit or a field exit doesn't get cut off early;
         // tune up if a legitimate shot ever gets timed out this way.
         private const val MAX_SHOT_FLIGHT_SECONDS = 15f
+
+        // Sept 2026 session - orbital drift. When a side's home planet is
+        // destroyed while its character still has HP, that character stops
+        // walking a fixed point and becomes a free Dynamic body drifting
+        // under whatever gravity remains (mainly the star). The initial
+        // "flung into orbit" kick's speed is a fraction of the true
+        // circular-orbit speed around the star at that exact radius
+        // (v = sqrt(G_effective * STAR_MASS / r) - see driftKickVelocity) -
+        // a principled starting point (an object moving exactly that fast,
+        // exactly tangent to its radius, traces a circle given only the
+        // star's own pull), not a promise of a real stable orbit once the
+        // surviving planet's own gravity also comes into play. 1f is a
+        // starting guess, tunable like every other illustrative constant
+        // in this companion object.
+        private const val ORBITAL_DRIFT_SPEED_FRACTION = 1f
+
+        // Sept 2026 session - "landing" on a surviving planet/moon while
+        // drifting deals a small, fixed knock rather than anything
+        // dramatic - drifting is mainly a repositioning/survival mechanic,
+        // not meant to be a new way to deal real damage.
+        private const val ORBITAL_DRIFT_LANDING_DAMAGE = 1
 
         // Sept 2026 session - Boo: "each player can have 4 stray shots for
         // a total of 8. and agreed on the oldest is quietly retired if a
@@ -543,6 +566,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // impact, so this only ever holds still-live strays.
     private val playerStrays = mutableListOf<Entity>()
     private val aiStrays = mutableListOf<Entity>()
+
+    // Sept 2026 session - orbital drift, see the trigger check in render()
+    // (right before the win/loss check) for the full design and
+    // beginPlayerDrift/beginAiDrift for how each begins. *Drifting is true from the instant
+    // a side's home planet is destroyed (while that side's character still
+    // has HP) until it lands back on solid ground; *DriftResolved latches
+    // true the moment it lands, so the still-destroyed origin planet never
+    // re-triggers a second drift - a real limitation (if the planet this
+    // side re-anchors onto is LATER also destroyed, it does not drift a
+    // second time), not an oversight - see PROJECT_STATE.md's orbital-drift
+    // entry. *DriftFrozenVelocity stashes the drifting body's velocity
+    // while it's frozen (Kinematic) for its own turn - see freezePlayerDrift/
+    // thawPlayerDrift - since Box2D's SetType doesn't reset velocity on a
+    // Kinematic<->Dynamic switch by itself.
+    private var playerDrifting = false
+    private var playerDriftResolved = false
+    private var playerDriftFrozenVelocity: Vector2? = null
+    private var aiDrifting = false
+    private var aiDriftResolved = false
+    private var aiDriftFrozenVelocity: Vector2? = null
     // Phase 14 - Kinematic now, not Static (see avatarBody's doc comment
     // for why Kinematic is the right body type for "moves under direct
     // control, still collidable"), since aiTurnController can now
@@ -857,10 +900,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             shotSpeedMultiplier = { shotSpeedTuning.multiplier },
             aimErrorDegrees = AI_AIM_ERROR_DEGREES,
             aimErrorSpeedFraction = AI_AIM_ERROR_SPEED_FRACTION,
-            onFire = { origin, velocity -> fireMissile(origin, velocity, side = Side.AI, excludeCategory = CATEGORY_AI_TARGET) },
+            onFire = { origin, velocity ->
+                // Orbital drift - resume drifting the instant this shot
+                // actually fires, undoing the freeze startAiTurn applied -
+                // see freezeAiDrift/thawAiDrift's doc comments.
+                if (aiDrifting) thawAiDrift()
+                fireMissile(origin, velocity, side = Side.AI, excludeCategory = CATEGORY_AI_TARGET)
+            },
             onTurnComplete = {
                 val giveControlToPlayer = {
                     Gdx.input.inputProcessor = fullInputProcessor
+                    // Orbital drift - freeze the player's drifting body the
+                    // instant it becomes their turn to act, so they aim/fire
+                    // from a stable spot - see freezePlayerDrift's doc comment.
+                    if (playerDrifting) freezePlayerDrift()
                     snapCameraToActiveAvatar(avatarMovementController.position)
                 }
                 // Sept 2026 session - fireMissile() (called synchronously,
@@ -893,6 +946,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             onTurnPassed = {
                 Gdx.input.inputProcessor = restrictedInputProcessor
                 val startAiTurn = {
+                    // Orbital drift - freeze the AI's drifting body the
+                    // instant it becomes its turn to act - see
+                    // freezeAiDrift's doc comment. Done before startTurn()
+                    // so the AI's own aim search reads a stable, unmoving
+                    // origin the whole time it's thinking.
+                    if (aiDrifting) freezeAiDrift()
                     aiTurnController.startTurn(avatarMovementController.position)
                     snapCameraToActiveAvatar(aiTurnController.position)
                 }
@@ -932,6 +991,11 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             aimErrorDegrees = PLAYER_AIM_ERROR_DEGREES,
             aimErrorSpeedFraction = PLAYER_AIM_ERROR_SPEED_FRACTION,
             onFire = { velocity ->
+                // Orbital drift - resume drifting the instant this shot
+                // actually fires, undoing the freeze giveControlToPlayer
+                // applied - see freezePlayerDrift/thawPlayerDrift's doc
+                // comments.
+                if (playerDrifting) thawPlayerDrift()
                 fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = CATEGORY_PLAYER_AVATAR)
                 avatarMovementController.onFired()
             }
@@ -1320,6 +1384,192 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
+     * Sept 2026 session - orbital drift's initial "flung into orbit" kick
+     * speed, shared by [beginPlayerDrift]/[beginAiDrift] - see
+     * ORBITAL_DRIFT_SPEED_FRACTION's doc comment for the reasoning. The
+     * direction is always the counterclockwise tangent to the radius from
+     * the star to [position] - arbitrary (nothing about this game's layout
+     * demands one rotation direction over the other) but fixed, so a
+     * player drift and an AI drift always behave the same way.
+     */
+    private fun driftKickVelocity(position: Vector2): Vector2 {
+        val radialFromStar = Vector2(position).sub(STAR_X, STAR_Y)
+        val distanceFromStar = radialFromStar.len().coerceAtLeast(GravitySystem.MIN_DISTANCE)
+        radialFromStar.nor()
+        val tangent = Vector2(-radialFromStar.y, radialFromStar.x)
+        val orbitSpeed = sqrt(GravitySystem.G * gravitySystem.gravityMultiplier * STAR_MASS / distanceFromStar)
+        return tangent.scl(orbitSpeed * ORBITAL_DRIFT_SPEED_FRACTION)
+    }
+
+    /**
+     * Sept 2026 session - orbital drift begins for the player, called once
+     * from render() the instant [launchPlanetEntity] is found destroyed
+     * while the player still has HP - see that call site's doc comment.
+     * Flips [avatarBody] from Kinematic to Dynamic (see that field's own
+     * doc comment for why it started Kinematic - none of that reasoning
+     * applies anymore once there's no fixed planet left to walk around).
+     * [createAvatarBody]'s fixture never sets an explicit density - fine
+     * for a Kinematic body, whose mass Box2D never uses, but a Dynamic one
+     * needs a real mass or [GravitySystem]'s force-from-acceleration
+     * conversion has nothing to multiply by - set here, once, rather than
+     * at creation time, so every OTHER body this game creates keeps
+     * whatever density makes sense for whatever it is. Tags [avatarEntity]
+     * [GravityAffectedComponent] so [GravitySystem] starts pulling on it
+     * next frame (Ashley's Family-based queries pick this up automatically
+     * - see that component's own doc comment), then hands
+     * [AvatarMovementController.beginDrift] a closure reading this body's
+     * own live position, so [avatarMovementController.position] (and
+     * everything downstream of it - launchPoint, sprite drawing, aiming)
+     * starts reading the real drifting body instead of the old
+     * angle-around-a-point formula.
+     */
+    private fun beginPlayerDrift() {
+        avatarBody.type = BodyDef.BodyType.DynamicBody
+        for (fixture in avatarBody.fixtureList) fixture.density = 1f
+        avatarBody.resetMassData()
+        avatarEntity.add(GravityAffectedComponent())
+        avatarBody.linearVelocity = driftKickVelocity(avatarBody.position)
+        avatarMovementController.beginDrift { physicsBodyMapper.get(avatarEntity).body.position }
+        slingshotInputProcessor.horizonRestrictionEnabled = false
+        playerDrifting = true
+    }
+
+    /** The AI-side twin of [beginPlayerDrift] - see that method's doc comment for the full reasoning, identical here for [targetCharacterBody]/[targetCharacterEntity]/[aiTurnController]. */
+    private fun beginAiDrift() {
+        targetCharacterBody.type = BodyDef.BodyType.DynamicBody
+        for (fixture in targetCharacterBody.fixtureList) fixture.density = 1f
+        targetCharacterBody.resetMassData()
+        targetCharacterEntity.add(GravityAffectedComponent())
+        targetCharacterBody.linearVelocity = driftKickVelocity(targetCharacterBody.position)
+        aiTurnController.beginDrift { physicsBodyMapper.get(targetCharacterEntity).body.position }
+        aiDrifting = true
+    }
+
+    /**
+     * Sept 2026 session - orbital drift's "freeze during your own turn"
+     * half, called the instant it becomes the drifting player's turn to
+     * act (see the aiTurnController.onTurnComplete callback in init{}).
+     * Flips [avatarBody] back to Kinematic and zeroes its velocity - Box2D's
+     * `Body::SetType` does NOT reset velocity itself on a Kinematic<->Dynamic
+     * switch (confirmed against Box2D's own source, not guessed), and a
+     * Kinematic body still integrates its OWN linearVelocity into its
+     * position every physics tick even with no forces applied - so without
+     * explicitly zeroing it here, the character would keep drifting
+     * straight through their own supposedly-frozen turn. The velocity is
+     * saved into [playerDriftFrozenVelocity] first so [thawPlayerDrift] can
+     * hand the exact same flight back the instant this turn's shot fires.
+     */
+    private fun freezePlayerDrift() {
+        playerDriftFrozenVelocity = Vector2(avatarBody.linearVelocity)
+        avatarBody.linearVelocity = Vector2.Zero
+        avatarBody.type = BodyDef.BodyType.KinematicBody
+    }
+
+    /** Undoes [freezePlayerDrift] the instant the player's shot actually fires - see that method's doc comment. */
+    private fun thawPlayerDrift() {
+        avatarBody.type = BodyDef.BodyType.DynamicBody
+        avatarBody.linearVelocity = playerDriftFrozenVelocity ?: Vector2.Zero
+        playerDriftFrozenVelocity = null
+    }
+
+    /** The AI-side twin of [freezePlayerDrift] - see that method's doc comment for the full reasoning, identical here for [targetCharacterBody]/[aiDriftFrozenVelocity]. */
+    private fun freezeAiDrift() {
+        aiDriftFrozenVelocity = Vector2(targetCharacterBody.linearVelocity)
+        targetCharacterBody.linearVelocity = Vector2.Zero
+        targetCharacterBody.type = BodyDef.BodyType.KinematicBody
+    }
+
+    /** Undoes [freezeAiDrift] the instant the AI's shot actually fires - see [thawPlayerDrift]'s doc comment. */
+    private fun thawAiDrift() {
+        targetCharacterBody.type = BodyDef.BodyType.DynamicBody
+        targetCharacterBody.linearVelocity = aiDriftFrozenVelocity ?: Vector2.Zero
+        aiDriftFrozenVelocity = null
+    }
+
+    /**
+     * Sept 2026 session - orbital drift's "hits the star" / "lands on a
+     * surviving planet" outcomes for the player, checked once per frame
+     * while [playerDrifting] (see that call site in render()). A plain
+     * distance-between-centers test (the same "sum of the two radii"
+     * collision rule Box2D's own fixtures use) rather than a second Box2D
+     * ContactListener: [World.setContactListener] only ever accepts one
+     * listener at a time, already claimed by [projectileContactListener]
+     * for missile-vs-anything impacts, and a drifting character touching a
+     * celestial body is a completely different kind of event (no
+     * projectile/damage-on-hit semantics to share with that one) - simplest
+     * to just poll for it here, right after the physics step already ran
+     * this frame, the same place the shot-resolution/field-exit checks
+     * above already poll positions rather than wait on a Box2D callback.
+     *
+     * Flying into the star deals enough damage to guarantee
+     * [HealthComponent.isDefeated] - the win/loss check immediately below
+     * this call site catches it the same frame, no separate "flew into the
+     * sun" branch needed. Landing on a surviving planet/moon instead deals
+     * [ORBITAL_DRIFT_LANDING_DAMAGE] and re-anchors the player back into
+     * the normal walk-around-a-point model via
+     * [AvatarMovementController.reanchor] - necessarily the AI's own planet
+     * in this game's current 2-planet layout, since the player's own
+     * planet is what just got destroyed to start this drift in the first
+     * place. [landingAngleDegrees] is simply wherever the drifting body
+     * actually touched down, via `atan2` - not a re-roll or a fixed
+     * starting angle - so the player resumes walking exactly where they
+     * landed instead of teleporting somewhere else on the new planet.
+     */
+    private fun checkPlayerDriftLanding() {
+        val position = avatarBody.position
+        val health = healthMapper.get(avatarEntity)
+        if (position.dst(STAR_X, STAR_Y) <= STAR_RADIUS + AVATAR_RADIUS) {
+            health.applyDamage(health.maxHp)
+            playerDrifting = false
+            playerDriftResolved = true
+            return
+        }
+        val landedPlanetPosition = when {
+            !gravitySourceMapper.get(launchPlanetEntity).isDestroyed && position.dst(launchPlanetPosition) <= PLANET_RADIUS + AVATAR_RADIUS -> launchPlanetPosition
+            !gravitySourceMapper.get(targetPlanetEntity).isDestroyed && position.dst(targetPlanetPosition) <= PLANET_RADIUS + AVATAR_RADIUS -> targetPlanetPosition
+            else -> null
+        } ?: return
+
+        health.applyDamage(ORBITAL_DRIFT_LANDING_DAMAGE)
+        val landingAngleDegrees = atan2(position.y - landedPlanetPosition.y, position.x - landedPlanetPosition.x) * MathUtils.radiansToDegrees
+        avatarBody.type = BodyDef.BodyType.KinematicBody
+        avatarBody.linearVelocity = Vector2.Zero
+        playerDriftFrozenVelocity = null
+        avatarEntity.remove(GravityAffectedComponent::class.java)
+        avatarMovementController.reanchor(landedPlanetPosition, landingAngleDegrees)
+        slingshotInputProcessor.horizonRestrictionEnabled = true
+        playerDrifting = false
+        playerDriftResolved = true
+    }
+
+    /** The AI-side twin of [checkPlayerDriftLanding] - see that method's doc comment for the full reasoning, identical here for [targetCharacterBody]/[targetCharacterEntity]/[aiTurnController]. */
+    private fun checkAiDriftLanding() {
+        val position = targetCharacterBody.position
+        val health = healthMapper.get(targetCharacterEntity)
+        if (position.dst(STAR_X, STAR_Y) <= STAR_RADIUS + TARGET_RADIUS) {
+            health.applyDamage(health.maxHp)
+            aiDrifting = false
+            aiDriftResolved = true
+            return
+        }
+        val landedPlanetPosition = when {
+            !gravitySourceMapper.get(launchPlanetEntity).isDestroyed && position.dst(launchPlanetPosition) <= PLANET_RADIUS + TARGET_RADIUS -> launchPlanetPosition
+            !gravitySourceMapper.get(targetPlanetEntity).isDestroyed && position.dst(targetPlanetPosition) <= PLANET_RADIUS + TARGET_RADIUS -> targetPlanetPosition
+            else -> null
+        } ?: return
+
+        health.applyDamage(ORBITAL_DRIFT_LANDING_DAMAGE)
+        val landingAngleDegrees = atan2(position.y - landedPlanetPosition.y, position.x - landedPlanetPosition.x) * MathUtils.radiansToDegrees
+        targetCharacterBody.type = BodyDef.BodyType.KinematicBody
+        targetCharacterBody.linearVelocity = Vector2.Zero
+        aiDriftFrozenVelocity = null
+        targetCharacterEntity.remove(GravityAffectedComponent::class.java)
+        aiTurnController.reanchor(landedPlanetPosition, landingAngleDegrees)
+        aiDrifting = false
+        aiDriftResolved = true
+    }
+
+    /**
      * Sept 2026 session - Boo: "when it is a avatars turn, the camera
      * should go to that specific character." Called once at each turn
      * transition (from inside the deferred giveControlToPlayer/startAiTurn
@@ -1381,11 +1631,21 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // both already hold a reference to - is refreshed here every frame
         // rather than being fixed once at construction like Phase 8's was.
         launchPoint.set(avatarMovementController.position)
-        avatarBody.setTransform(avatarMovementController.position, 0f)
+        // Orbital drift - once a side is drifting, its body's position is
+        // driven by real physics (Dynamic, under gravity) or is frozen
+        // exactly where it already is (Kinematic, zero velocity - see
+        // freezePlayerDrift/freezeAiDrift) - setTransform here would fight
+        // either one by forcing the stale angle-around-planetCenter answer
+        // back onto it every frame. avatarMovementController.position/
+        // aiTurnController.position already read the real live body
+        // position while drifting (see their beginDrift), so every other
+        // reader of those (launchPoint just above, sprite drawing, etc.)
+        // keeps working unchanged either way.
+        if (!playerDrifting) avatarBody.setTransform(avatarMovementController.position, 0f)
         // Phase 14 - aiTurnController.position can change the instant
         // startTurn() runs (see its reposition()), so this needs to be
         // synced every frame same as avatarBody just above, not only once.
-        targetCharacterBody.setTransform(aiTurnController.position, 0f)
+        if (!aiDrifting) targetCharacterBody.setTransform(aiTurnController.position, 0f)
         aiTurnController.update(delta)
 
         engine.update(delta) // drives PhysicsSystem, which owns the fixed-timestep accumulator
@@ -1402,6 +1662,40 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // cap forever.
         playerStrays.removeAll { !engineHasEntity(it) }
         aiStrays.removeAll { !engineHasEntity(it) }
+
+        // Sept 2026 session - orbital drift's trigger: the instant a side's
+        // home planet is destroyed while that side's character still has
+        // HP, it stops walking a fixed point and starts drifting - see
+        // beginPlayerDrift/beginAiDrift. *DriftResolved guards this so a
+        // planet that's been destroyed for a while (this side already
+        // drifted and landed) never re-triggers a second drift - see that
+        // field's own doc comment for why this is a real, documented
+        // limitation, not an oversight. Checked here - right after
+        // flushRemovals, BEFORE the shot-resolution block below - because
+        // that block can synchronously fire this very frame's pending
+        // turn-handoff (see shotResolved's doc comment): a missile that
+        // destroys a planet and resolves the active shot in the very same
+        // frame is the common case, not a rare one, and startAiTurn/
+        // giveControlToPlayer both need aiDrifting/playerDrifting already
+        // true (so they know to freeze the drifting body) by the time they
+        // run - checking here instead of after the block below is what
+        // guarantees that ordering.
+        if (!playerDrifting && !playerDriftResolved && gravitySourceMapper.get(launchPlanetEntity).isDestroyed) {
+            beginPlayerDrift()
+        }
+        if (!aiDrifting && !aiDriftResolved && gravitySourceMapper.get(targetPlanetEntity).isDestroyed) {
+            beginAiDrift()
+        }
+
+        // Sept 2026 session - orbital drift's "hits the star" / "lands on
+        // a surviving planet" outcomes - see checkPlayerDriftLanding/
+        // checkAiDriftLanding's own doc comments. Checked every frame
+        // while actually drifting, right after the trigger check above so
+        // a fresh kick's very first frame is never mistaken for a landing
+        // (the still-destroyed origin planet is excluded from that check
+        // by its own isDestroyed guard regardless).
+        if (playerDrifting) checkPlayerDriftLanding()
+        if (aiDrifting) checkAiDriftLanding()
 
         // Sept 2026 session - see shotResolved's doc comment for the full
         // design. Checked here (after flushRemovals, not at the top of this
@@ -1443,12 +1737,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // planet does NOT end the game by itself - see PROJECT_STATE.md's
         // Phase 22 entry for the confirmed scope call and the orbital-drift
         // follow-up that's meant for a defeated-planet-but-still-alive
-        // character instead). Reads straight off HealthComponent the same
-        // "still readable after the entity's been removed from the engine"
-        // way renderStatsPanel already relies on for planet mass - see
-        // targetPlanetEntity's doc comment for why that's safe. Checked
-        // every frame right after flushRemovals, so a defeat is caught the
-        // same frame the fatal hit actually resolves.
+        // character instead - now built, see the trigger/landing checks
+        // earlier in this method, right after flushRemovals). Reads
+        // straight off HealthComponent the same "still readable after the
+        // entity's been removed from the engine" way renderStatsPanel
+        // already relies on for planet mass - see targetPlanetEntity's doc
+        // comment for why that's safe. Checked every frame right after
+        // flushRemovals, so a defeat is caught the same frame the fatal
+        // hit actually resolves (including a drift's star-hit damage,
+        // applied earlier in this same frame by checkPlayerDriftLanding/
+        // checkAiDriftLanding).
         val playerHealth = healthMapper.get(avatarEntity)
         val targetHealth = healthMapper.get(targetCharacterEntity)
         if (playerHealth.isDefeated) {
@@ -1557,13 +1855,26 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val starDiameter = STAR_RADIUS * 2f
         worldBatch.draw(starTexture, STAR_X - STAR_RADIUS, STAR_Y - STAR_RADIUS, starDiameter, starDiameter)
         val planetDiameter = PLANET_RADIUS * 2f
-        worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
-        worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
 
-        // Phase 21, extended to both planets once the launch planet also
-        // became damageable (see drawDamageOverlayIfDamaged's doc comment).
-        drawDamageOverlayIfDamaged(launchPlanetEntity, launchPlanetPosition, planetDiameter)
-        drawDamageOverlayIfDamaged(targetPlanetEntity, targetPlanetPosition, planetDiameter)
+        // Sept 2026 session - same "fixed geometry, no live link back to
+        // the entity" bug as currentCelestialObstacles fixed for the aim/
+        // AI-search side: this draw call used to fire unconditionally every
+        // frame regardless of whether the planet had actually been
+        // destroyed, so a fully-destroyed planet (its real body/entity long
+        // gone - see ProjectileContactListener.flushRemovals) kept showing
+        // its intact sprite forever. Boo, on-device: "the planet image is
+        // still there" after destroying the AI's planet. Each planet now
+        // only draws while it isn't isDestroyed; drawDamageOverlayIfDamaged
+        // (which fades toward full opacity as damage approaches 100%) is
+        // skipped too once destroyed - nothing left to overlay onto.
+        if (!gravitySourceMapper.get(launchPlanetEntity).isDestroyed) {
+            worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+            drawDamageOverlayIfDamaged(launchPlanetEntity, launchPlanetPosition, planetDiameter)
+        }
+        if (!gravitySourceMapper.get(targetPlanetEntity).isDestroyed) {
+            worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+            drawDamageOverlayIfDamaged(targetPlanetEntity, targetPlanetPosition, planetDiameter)
+        }
         worldBatch.end()
     }
 
@@ -1886,8 +2197,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * Sept 2026 session - the Pass button is gone along with post-shot
      * movement: there's nothing left to end early once firing itself ends
      * the turn (see [AvatarMovementController]'s class doc comment).
+     *
+     * **Orbital drift (Sept 2026 session).** Hidden entirely while
+     * [playerDrifting] - there's no movement budget to spend (see
+     * [AvatarMovementController]'s "Orbital drift" doc paragraph), so
+     * drawing live but dead buttons would just be confusing.
      */
     private fun renderMovementControls() {
+        if (playerDrifting) return
         val leftRect = avatarMovementController.leftButtonRect
         val rightRect = avatarMovementController.rightButtonRect
 

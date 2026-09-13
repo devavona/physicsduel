@@ -87,6 +87,11 @@ import kotlin.math.sqrt
  * releasing ALWAYS cancels, even if the finger is back out aiming
  * somewhere by the time it lifts - the pass-through-center is what
  * commits to "never mind," not the final release position.
+ *
+ * **Orbital drift (Sept 2026 session).** [horizonRestrictionEnabled] lets
+ * [PlayScreen] switch this whole restriction off while the player is
+ * drifting - there's no home planet left to protect at that point, so
+ * [isBelowHorizon]/[clampAboveHorizon] both become no-ops.
  */
 class SlingshotInputProcessor(
     private val launchPoint: Vector2,
@@ -128,6 +133,11 @@ class SlingshotInputProcessor(
         // "pull back past your character."
         private const val PULL_COMMIT_DISTANCE = 2f
     }
+
+    // Orbital drift (Sept 2026 session) - see the class doc comment.
+    // PlayScreen flips this off the instant the player's character starts
+    // drifting and back on the instant it re-anchors onto solid ground.
+    var horizonRestrictionEnabled = true
 
     private val touchPoint = Vector2()
     private var aiming = false
@@ -247,8 +257,9 @@ class SlingshotInputProcessor(
         return (planetRadius / distance).coerceIn(0f, 1f)
     }
 
-    /** True if [velocity], fired from [origin], would fly into the sphere centered at [planetCenter] - see [clampAboveHorizon]. */
+    /** True if [velocity], fired from [origin], would fly into the sphere centered at [planetCenter] - see [clampAboveHorizon]. Always false while [horizonRestrictionEnabled] is off - see the class doc comment's "Orbital drift" paragraph. */
     private fun isBelowHorizon(origin: Vector2, velocity: Vector2): Boolean {
+        if (!horizonRestrictionEnabled) return false
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
         val direction = Vector2(velocity).nor()
         val sinThreshold = horizonSinThreshold(origin)
@@ -268,6 +279,7 @@ class SlingshotInputProcessor(
      * than snapping to one fixed side.
      */
     private fun clampAboveHorizon(origin: Vector2, velocity: Vector2): Vector2 {
+        if (!horizonRestrictionEnabled) return velocity
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
         val direction = Vector2(velocity).nor()
         val sinThreshold = horizonSinThreshold(origin)

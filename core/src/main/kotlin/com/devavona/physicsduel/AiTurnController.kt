@@ -64,6 +64,18 @@ import kotlin.math.sqrt
  * every candidate this class ever considers - and the final fired shot -
  * from pointing back into whichever planet it's currently standing on;
  * see that method's doc comment.
+ *
+ * **Orbital drift (Sept 2026 session).** When the AI's home planet is
+ * destroyed while it still has HP, [PlayScreen] hands this class's
+ * position over to a real, freely-moving Box2D body instead - see
+ * [beginDrift]. [position] then reads straight from
+ * [driftPositionOverride]; [startTurn] skips [reposition] entirely while
+ * drifting (no fixed surface left to walk - "lose the walk-around
+ * movement budget entirely"), [searchAim] centers its sweep on the
+ * straight line to the target instead of this class's own (now
+ * meaningless) outward-facing angle, and [clampAboveHorizon] stops
+ * restricting anything (there's no home planet left to protect). [reanchor]
+ * is the way back once the drifting body actually lands on solid ground.
  */
 class AiTurnController(
     private val planetCenter: Vector2,
@@ -149,8 +161,14 @@ class AiTurnController(
     var angleDegrees: Float = startAngleDegrees
         private set
 
-    /** The AI's current world position - same "fixed height above a planet's surface, at an angle" formula as [AvatarMovementController.position]. [PlayScreen] syncs the AI's Box2D body to this every frame. */
-    val position: Vector2 get() = positionAt(angleDegrees)
+    // Orbital drift (Sept 2026 session) - see the class doc comment and
+    // [beginDrift]/[reanchor]. Null the entire game unless the AI's home
+    // planet has been destroyed; while non-null, [position] reads straight
+    // from it instead of the angle-around-planetCenter formula.
+    private var driftPositionOverride: (() -> Vector2)? = null
+
+    /** The AI's current world position - same "fixed height above a planet's surface, at an angle" formula as [AvatarMovementController.position] - or, while drifting, wherever [driftPositionOverride] says the real physics body actually is. [PlayScreen] syncs the AI's Box2D body to this every frame (skipped while drifting - see that call site). */
+    val position: Vector2 get() = driftPositionOverride?.invoke() ?: positionAt(angleDegrees)
 
     private val targetPosition = Vector2()
     private var timeRemaining = 0f
@@ -161,7 +179,11 @@ class AiTurnController(
 
     fun startTurn(targetPosition: Vector2) {
         this.targetPosition.set(targetPosition)
-        reposition(targetPosition)
+        // Orbital drift - no movement budget while drifting (see the class
+        // doc comment), so there's nothing for reposition() to do; skipping
+        // it also means it never overwrites angleDegrees with a stale
+        // "candidate around planetCenter" answer that means nothing anymore.
+        if (driftPositionOverride == null) reposition(targetPosition)
         timeRemaining = thinkDelaySeconds
         active = true
     }
@@ -173,6 +195,31 @@ class AiTurnController(
         if (timeRemaining <= 0f) {
             fire()
         }
+    }
+
+    /**
+     * Orbital drift begins: [PlayScreen] calls this the instant it flips
+     * the AI's Box2D body from Kinematic to Dynamic and gives it a
+     * tangential kick, handing [position] over to [positionSupplier] (a
+     * closure reading that body's live, physics-driven position) instead
+     * of the angle-around-[planetCenter] formula from here on.
+     */
+    fun beginDrift(positionSupplier: () -> Vector2) {
+        driftPositionOverride = positionSupplier
+    }
+
+    /**
+     * Orbital drift ends: called the instant the drifting body actually
+     * lands on solid ground (a surviving planet/moon - see [PlayScreen]'s
+     * orbital-drift landing check). Clears [driftPositionOverride] and
+     * re-anchors the normal walk-around-a-fixed-point model at
+     * [newPlanetCenter]/[newAngleDegrees] - wherever the landing spot
+     * naturally puts it.
+     */
+    fun reanchor(newPlanetCenter: Vector2, newAngleDegrees: Float) {
+        driftPositionOverride = null
+        planetCenter.set(newPlanetCenter)
+        angleDegrees = newAngleDegrees
     }
 
     /**
@@ -297,7 +344,18 @@ class AiTurnController(
         // more simulated time to be judged fairly (see the constructor's
         // shotSpeedMultiplier doc comment).
         val effectiveSimMaxSeconds = aimSearch.simMaxSeconds / speedTuning
-        val baseAngleRadians = angleDegrees * MathUtils.degreesToRadians
+        // Orbital drift - angleDegrees no longer means "outward-facing
+        // direction away from my own planet" while drifting (there's no
+        // planet left under it at all), so centering the sweep there like
+        // the grounded case does (see this method's own doc comment for
+        // why THAT centering matters) would be centering on nothing
+        // meaningful. The straight line to the target is the sensible
+        // center once there's no own-planet self-collision to dodge.
+        val baseAngleRadians = if (driftPositionOverride != null) {
+            atan2(target.y - origin.y, target.x - origin.x)
+        } else {
+            angleDegrees * MathUtils.degreesToRadians
+        }
 
         val (bestVelocity, bestApproach) = bestAimFor(
             origin, baseAngleRadians, target, sources, multiplier, obstacles, effectiveAimSpeed, effectiveSimMaxSeconds
@@ -427,6 +485,9 @@ class AiTurnController(
      * through the planet" - the exact same flat-plane bug, here too).
      */
     private fun clampAboveHorizon(origin: Vector2, velocity: Vector2): Vector2 {
+        // Orbital drift - there's no home planet left to protect, so
+        // nothing to clamp against; see the class doc comment.
+        if (driftPositionOverride != null) return velocity
         val radialOutward = Vector2(origin).sub(planetCenter).nor()
         val direction = Vector2(velocity).nor()
         val sinThreshold = horizonSinThreshold(origin)

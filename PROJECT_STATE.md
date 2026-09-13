@@ -2520,7 +2520,7 @@ a loss).
    confirm nothing looks stale/leftover from the previous run (planet
    positions, HP bars, mass bars should all be fresh).
 
-## Orbital drift for a defeated-planet-but-alive character - captured design note, own future phase (Sept 2026 session, not yet built)
+## Orbital drift for a defeated-planet-but-alive character - captured design note (Sept 2026 session) - now built, see Phase 29 below
 
 Boo's follow-up the moment win/loss scope came up: what happens to a
 character whose planet gets destroyed while they still have HP left?
@@ -3680,6 +3680,191 @@ line, same as any other stray.
    something, or exit the field within a couple seconds) are completely
    unaffected - this only ever kicks in after 15 real seconds of an
    unresolved shot.
+
+## Destroyed planet's sprite kept showing forever - fixed
+
+Boo, on-device, right after confirming the ghost-obstacle fix worked
+("projectiles now go through that space unaffected"): "however, the
+planet image is still there." Exact same root cause as the ghost-
+obstacle bug, just on the visual side instead of the aim/AI-search
+side: `renderCelestialSprites()` drew each planet's texture
+unconditionally every frame from its fixed `launchPlanetPosition`/
+`targetPlanetPosition`, with no check against whether that planet had
+actually been destroyed. `drawDamageOverlayIfDamaged` already faded a
+damage overlay toward full opacity as mass approached zero, but that
+overlay draws ON TOP of the still-fully-drawn base sprite underneath -
+at 100% damage the base planet was still there, just with a maxed-out
+overlay over it, not actually hidden.
+
+**Fix.** Both planet draws (and their matching `drawDamageOverlayIfDamaged`
+call - nothing left to overlay once the base sprite is gone) are now
+gated on `!GravitySourceComponent.isDestroyed` for that planet. A
+destroyed planet's sprite and damage overlay simply stop drawing the
+instant it's destroyed, matching what already happens physically (real
+body/entity gone) and matching the aim-preview/AI-search fix from
+earlier this session.
+
+#### How to test this fix on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Destroy either planet and confirm its sprite (and any damage overlay)
+   disappears completely the instant it's destroyed - not just faded/
+   scorched-looking, genuinely gone.
+3. Confirm the star and the surviving planet are unaffected - still
+   drawing normally.
+4. Confirm the HUD's "DESTROYED" label (`renderStatsPanel`) and this
+   sprite disappearing agree with each other - they should always change
+   at the same moment, since both read the same `isDestroyed` flag.
+
+**Was not built yet as of this fix - now built, see Phase 29 immediately
+below.** At the time this fix landed, the character who was standing on
+a now-destroyed planet (the AI's target, in Boo's on-device report)
+still didn't start drifting - it kept walking the same fixed
+angle-around-a-now-empty-point model it always had, since orbital drift
+had only been designed and confirmed (two open questions resolved:
+freeze during its own turn, re-anchor on landing) earlier in this same
+session, not yet implemented - these three fixes (ghost obstacle, stuck
+orbit, destroyed-planet sprite) all came up as side issues in between
+agreeing on that design and actually starting to build it.
+
+## Phase 29: orbital drift built
+
+Boo confirmed "yes" to building this right after the three side-bug
+fixes above landed - see the captured design note earlier in this file
+for the original discussion and the two confirmed open questions
+(freeze during its own turn; re-anchor as a walking avatar on landing).
+This phase is that design, actually implemented.
+
+**What's built**, matching the confirmed design exactly:
+- **Trigger.** Checked once per frame in `PlayScreen.render()`, right
+  after `flushRemovals`/the stray-pruning step and *before* the
+  shot-resolution block (this ordering matters - see the in-code
+  comment at that call site: a missile that destroys a planet and
+  resolves the active shot in the very same frame is the common case,
+  not a rare one, and the turn-handoff closures that block can
+  synchronously fire need to already know a side is drifting so they
+  freeze it correctly). The instant a side's home planet
+  (`launchPlanetEntity`/`targetPlanetEntity`) is found destroyed while
+  that side's character still has HP, `beginPlayerDrift()`/
+  `beginAiDrift()` fires exactly once (latched by a new
+  `playerDriftResolved`/`aiDriftResolved` flag - see the known
+  limitation below).
+- **Becoming a free body.** The character's existing Box2D body
+  (`avatarBody`/`targetCharacterBody` - previously always Kinematic)
+  flips to Dynamic, gets a real fixture density (1f, set once here -
+  it never needed one before since Kinematic bodies ignore mass) and a
+  `resetMassData()` call, gets tagged `GravityAffectedComponent` (Ashley's
+  family queries pick this up automatically - `GravitySystem` starts
+  pulling on it next frame with zero other plumbing needed), and gets an
+  initial tangential "flung into orbit" kick: `driftKickVelocity()`
+  computes a true circular-orbit speed around the star at the drift's
+  starting radius (`v = sqrt(G_effective * STAR_MASS / r)`), scaled by
+  a new tunable `ORBITAL_DRIFT_SPEED_FRACTION` (1f - illustrative, not
+  tuned), in the counterclockwise tangent direction (arbitrary but
+  fixed, same for both sides).
+- **Position takes over from the old model.** `AvatarMovementController`/
+  `AiTurnController` both gained a `driftPositionOverride` field and a
+  `beginDrift(positionSupplier)` method - once set, `position` reads
+  straight from the live Box2D body instead of the old
+  angle-around-`planetCenter` formula. `PlayScreen.render()`'s per-frame
+  `avatarBody.setTransform(...)`/`targetCharacterBody.setTransform(...)`
+  calls are skipped for whichever side is drifting (that call would
+  otherwise fight the physics-driven position every frame).
+- **No movement budget.** "Lose the walk-around movement budget entirely"
+  - `AvatarMovementController.touchDown()` stops responding to the move
+  buttons the instant it's drifting, and `PlayScreen.renderMovementControls()`
+  hides them outright rather than leaving dead buttons on screen.
+  `AiTurnController.startTurn()` skips its own `reposition()` call the
+  same way.
+- **Freeze during its own turn, thaw on firing.** The moment a drifting
+  side's turn actually starts (`giveControlToPlayer`/`startAiTurn` in
+  `PlayScreen`'s `init{}`), `freezePlayerDrift()`/`freezeAiDrift()` saves
+  the body's current velocity, zeroes it, and flips the body back to
+  Kinematic - confirmed against Box2D's own source that `Body::SetType`
+  does *not* reset velocity on a Kinematic<->Dynamic switch by itself,
+  and a Kinematic body still integrates its own `linearVelocity` every
+  physics tick even with no forces applied, so this zeroing is what
+  actually holds it still (not just the type flip). The character can
+  aim/fire from that stable spot exactly like a normal turn.
+  `thawPlayerDrift()`/`thawAiDrift()` (called from the `onFire` callbacks,
+  the instant a shot actually launches) flips back to Dynamic and
+  restores the saved velocity, so the same drift resumes uninterrupted.
+- **No horizon restriction while drifting.** There's no home planet left
+  to protect. `SlingshotInputProcessor` gained a
+  `horizonRestrictionEnabled` flag (off while the player drifts, back on
+  after re-anchoring); `AiTurnController.clampAboveHorizon` is a no-op
+  whenever `driftPositionOverride` is set. `AiTurnController.searchAim`
+  also re-centers its angle sweep on the straight line to the target
+  while drifting instead of the now-meaningless "outward from my own
+  planet" direction the grounded case uses.
+- **Hitting the star / landing.** Checked every frame while a side is
+  actually drifting (`checkPlayerDriftLanding()`/`checkAiDriftLanding()`,
+  right after the trigger check above) via a plain distance-between-
+  centers test - **not** a second Box2D `ContactListener`:
+  `World.setContactListener` only ever accepts one at a time, already
+  claimed by `ProjectileContactListener` for missile impacts, and a
+  drifting character touching a celestial body doesn't share that
+  event's semantics anyway, so polling positions (the same style the
+  shot-resolution/field-exit checks already use) was simpler and lower-
+  risk than a second listener/dispatcher. Flying into the star deals
+  enough damage to guarantee defeat (the existing win/loss check catches
+  it the same frame). Landing on a surviving planet/moon deals exactly
+  `ORBITAL_DRIFT_LANDING_DAMAGE` (1) and re-anchors the character via
+  `AvatarMovementController.reanchor()`/`AiTurnController.reanchor()` -
+  wherever it actually touched down (via `atan2`, not a re-roll or fixed
+  angle) becomes its new walking position on whichever planet it hit -
+  necessarily the opponent's planet in this game's current 2-planet
+  layout.
+
+**Known limitation, documented not accidental:** the trigger only ever
+fires once per side, latched by `playerDriftResolved`/`aiDriftResolved`.
+If the planet a side re-anchors onto is *later* also destroyed (with
+that character still alive on it), they will **not** drift a second
+time - they'll just keep standing on the now-destroyed planet the same
+way any character stood on solid ground before this phase existed. This
+matches the confirmed design conversation, which only ever discussed a
+single hand-off (the current 2-planet layout guarantees at most one
+"still has a home, then doesn't" transition per side), and generalizing
+it to "whichever planet you're currently on gets destroyed, drift again"
+would need real design/scoping of its own - flagging it here rather than
+quietly leaving it unhandled.
+
+Other tunables introduced this phase, both illustrative/not tuned yet:
+`ORBITAL_DRIFT_SPEED_FRACTION` (1f) and `ORBITAL_DRIFT_LANDING_DAMAGE` (1),
+both in `PlayScreen`'s companion object.
+
+#### How to test this phase on-device
+
+1. Sync Gradle, run on-device as usual.
+2. Focus fire on the AI's planet (not the AI character itself) until it's
+   destroyed while the AI still has HP. The instant it's destroyed, the
+   AI's character should visibly separate from where the dead planet was
+   and start drifting under gravity (curving, not standing still) -
+   watch it over a few seconds even outside anyone's turn.
+3. When it becomes the AI's turn: camera should snap to it as usual, and
+   it should hold perfectly still (frozen) the whole time it's
+   "thinking" and firing - not continue drifting mid-turn. Immediately
+   after it fires, it should resume visibly drifting again.
+4. Confirm the AI's shot during this turn is never blocked/red for
+   "firing into your own planet" - there's no planet left to protect.
+5. Confirm the move buttons are gone from the corner while the AI would
+   normally show them for movement (this only visually applies to the
+   player's own turn, but worth double-checking the player-side drift
+   scenario in step 7 below shows the buttons vanish).
+6. Let it drift into the star (may take a few tries/turns depending on
+   the kick direction/speed) - should be an instant Game Over (AI
+   defeated).
+7. Reproduce the same sequence for the player's own planet (focus the
+   AI's fire on your own planet until it's destroyed while you still
+   have HP) - confirm the same drifting/freeze-thaw/no-horizon-
+   restriction behavior, plus that landing on the AI's surviving planet
+   deals a small hit and puts you back into normal walk-around-a-point
+   control (move buttons reappear, horizon restriction is back) exactly
+   where you touched down.
+8. General regression check: a normal game where neither planet is
+   destroyed should play exactly as before - this phase should be
+   completely invisible until a planet actually dies with its character
+   still alive.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

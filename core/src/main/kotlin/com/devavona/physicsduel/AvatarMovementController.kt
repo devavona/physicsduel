@@ -30,6 +30,16 @@ import com.badlogic.gdx.math.Vector2
  * actually launches - this class knows nothing about aiming or firing
  * itself, same separation-of-concerns as [GravityDebugController] only
  * owning gravity tuning.
+ *
+ * **Orbital drift (Sept 2026 session).** When the avatar's home planet is
+ * destroyed while it still has HP, [PlayScreen] hands this class's
+ * position over to a real, freely-moving Box2D body instead - see
+ * [beginDrift]. [position] then reads straight from
+ * [driftPositionOverride] instead of the angle-around-[planetCenter]
+ * formula, and [touchDown] stops responding to the move buttons entirely
+ * ("lose the walk-around movement budget entirely" - Boo, explicit) since
+ * there's no fixed surface left to walk. [reanchor] is the way back once
+ * the drifting body actually lands on solid ground again.
  */
 class AvatarMovementController(
     private val planetCenter: Vector2,
@@ -70,9 +80,16 @@ class AvatarMovementController(
     var turnNumber: Int = 1
         private set
 
-    /** The avatar's current world position: [heightAboveSurface] above [planetCenter]'s surface, at [angleDegrees]. */
+    // Orbital drift (Sept 2026 session) - see the class doc comment and
+    // [beginDrift]/[reanchor]. Null the entire game unless this side's
+    // home planet has been destroyed; while non-null, [position] reads
+    // straight from it instead of the angle-around-planetCenter formula.
+    private var driftPositionOverride: (() -> Vector2)? = null
+
+    /** The avatar's current world position: [heightAboveSurface] above [planetCenter]'s surface, at [angleDegrees] - or, while drifting, wherever [driftPositionOverride] says the real physics body actually is. */
     val position: Vector2
         get() {
+            driftPositionOverride?.let { return it() }
             val rad = angleDegrees * MathUtils.degreesToRadians
             val r = planetRadius + heightAboveSurface
             return Vector2(
@@ -96,6 +113,11 @@ class AvatarMovementController(
         }
 
     override fun touchDown(screenX: Int, screenY: Int, pointer: Int, button: Int): Boolean {
+        // Orbital drift - no movement budget while drifting, see the class
+        // doc comment. Swallow nothing (return false) so a touch here still
+        // falls through to whatever else might want it.
+        if (driftPositionOverride != null) return false
+
         val renderX = screenX.toFloat()
         val renderY = Gdx.graphics.height - screenY.toFloat() // touch input is top-left-origin; button rects are render-space (bottom-left-origin), same flip GravityDebugController does
 
@@ -123,5 +145,32 @@ class AvatarMovementController(
         stepsRemaining = stepsPerPhase
         turnNumber++
         onTurnPassed()
+    }
+
+    /**
+     * Orbital drift begins: [PlayScreen] calls this the instant it flips
+     * this side's Box2D body from Kinematic to Dynamic and gives it a
+     * tangential kick, handing [position] over to [positionSupplier] (a
+     * closure reading that body's live, physics-driven position) instead
+     * of the angle-around-[planetCenter] formula from here on.
+     */
+    fun beginDrift(positionSupplier: () -> Vector2) {
+        driftPositionOverride = positionSupplier
+    }
+
+    /**
+     * Orbital drift ends: called the instant the drifting body actually
+     * lands on solid ground (a surviving planet/moon - see [PlayScreen]'s
+     * orbital-drift landing check). Clears [driftPositionOverride] and
+     * re-anchors the normal walk-around-a-fixed-point model at
+     * [newPlanetCenter]/[newAngleDegrees] - wherever the landing spot
+     * naturally puts it - with a full fresh movement budget, same as any
+     * other turn boundary.
+     */
+    fun reanchor(newPlanetCenter: Vector2, newAngleDegrees: Float) {
+        driftPositionOverride = null
+        planetCenter.set(newPlanetCenter)
+        angleDegrees = newAngleDegrees
+        stepsRemaining = stepsPerPhase
     }
 }
