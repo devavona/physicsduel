@@ -3042,6 +3042,12 @@ up:**
   Step 1 (fixed squads + turn order, Phase 30) has now landed too; the
   play-field-size cap and scattered/region-quota placement are still
   unbuilt and unscheduled.
+- **Character placement, long-term** (Phase 30 on-device follow-up) -
+  Boo wants random placement for characters sharing one planet, even
+  distribution across planets once a side has enough of them, and
+  eventually scenes with more celestial bodies than characters. Fixed
+  symmetric offsets (`CHARACTER_START_ANGLE_SPREAD_DEGREES`) are a
+  stopgap only - not scheduled to a specific step yet.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
@@ -3985,8 +3991,8 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
   as their `planetCenter` (two independent `Vector2` copies of the same
   value - each can `reanchor()` independently later without affecting the
   other), at `AVATAR_START_ANGLE_DEGREES`/`AI_START_ANGLE_DEGREES` ±
-  `CHARACTER_START_ANGLE_SPREAD_DEGREES` (20°) so they don't spawn
-  overlapping.
+  `CHARACTER_START_ANGLE_SPREAD_DEGREES` (30°, bumped from an initial 20° -
+  see "On-device follow-up" below) so they don't spawn overlapping.
 - **Distinct collision categories per character.** New
   `CATEGORY_PLAYER_AVATAR_2`/`CATEGORY_AI_TARGET_2` bits (alongside the
   existing `CATEGORY_PLAYER_AVATAR`/`CATEGORY_AI_TARGET`) so each
@@ -4059,10 +4065,12 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
 - A player-facing turn-order-picker UI (Step 2) - order is a fixed
   index sequence (character 0, then 1) for now.
 - A real AI-targeting heuristic (Step 3) - see the placeholder above.
-- Any polish specific to two characters sharing one planet - crowding,
-  an AI's aim search treating a teammate as an obstacle, visual overlap
-  at the two starting angles if `CHARACTER_START_ANGLE_SPREAD_DEGREES`
-  turns out too tight on-device. Flagged for Step 3, not fixed blind.
+- Most polish specific to two characters sharing one planet - an AI's
+  aim search treating a teammate as an obstacle, general crowding feel.
+  Flagged for Step 3, not fixed blind. (The one crowding issue that did
+  turn up on first on-device look - the AI pair's starting spread being
+  too tight - got a stopgap fix already; see "On-device follow-up"
+  below.)
 - Characters are not added to `currentCelestialObstacles()` - an AI's
   shot can currently fly straight through a teammate/enemy character
   without being blocked by it (same as it always could pass through
@@ -4099,6 +4107,45 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
    test script (freeze/thaw, no-horizon-restriction while drifting,
    landing/re-anchoring, hitting the star) should still hold for
    whichever character is currently drifting.
+
+#### On-device follow-up (same session, first real look at Step 1 running)
+
+Boo's first on-device screenshot of Step 1 showed the two AI (red)
+characters looking crowded/near-touching on their shared planet, while
+the two player (blue) characters at the same angular spread looked
+comfortably spaced. Root cause: `TARGET_RADIUS` (0.3, the AI/target
+sprite's drawn radius) is 50% bigger than `AVATAR_RADIUS` (0.2, the
+player sprite's) - a difference that's existed since long before Step 1,
+just never visible until two characters had to share the gap between
+them. At the original 20° spread and this scene's orbit radius (`PLANET_
+RADIUS` 0.8 + `LAUNCH_POINT_CLEARANCE` 0.3 = 1.1), the chord distance
+between the two characters left the bigger AI sprites almost no
+clearance while the smaller player sprites had plenty. Purely cosmetic -
+since neither character is in orbital-drift/physics mode at spawn, their
+positions come straight from the angle formula, so they don't actually
+collide or push apart, they just visually crowd.
+
+**Fix applied:** `CHARACTER_START_ANGLE_SPREAD_DEGREES` bumped 20° -> 30°
+(both sides, still one shared constant) - confirmed as the quick stopgap
+Boo wanted over the other two options offered (build real random
+placement now, or leave the crowding as-is). Gives both sides comfortable
+clearance at this orbit radius; not yet re-verified on-device as of this
+write-up.
+
+**Long-term design captured, not built:** Boo, explicit, once he'd seen
+the fixed-spread layout: characters sharing one planet should eventually
+be placed *randomly* on it rather than at a fixed symmetric offset: "long
+term I want characters randomly on their planet when 2 on 1 planet. if
+there are enough planets for each player, distribute evenly. eventuall I
+see more celestial bodies than players but that is for later." So the
+eventual model is: (1) random placement for characters sharing a single
+planet, (2) even distribution across planets once a side has enough
+celestial bodies that each character *could* get its own, and (3) a
+future scene with more celestial bodies in play than there are
+characters to place on them - explicitly flagged by Boo as further out
+than the other two. None of this is built - `CHARACTER_START_ANGLE_
+SPREAD_DEGREES` stays a fixed shared constant for now. Added to the
+"Still not decided" list below as its own thread.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

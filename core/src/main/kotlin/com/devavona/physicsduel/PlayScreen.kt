@@ -469,7 +469,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // enough clearance for two AVATAR_RADIUS/TARGET_RADIUS-sized
         // characters at PLANET_RADIUS + LAUNCH_POINT_CLEARANCE to stand
         // apart without touching.
-        private const val CHARACTER_START_ANGLE_SPREAD_DEGREES = 20f
+        //
+        // Bumped 20f -> 30f the same session, on-device testing: the AI
+        // pair looked crowded/near-overlapping at 20f while the player
+        // pair looked fine, because TARGET_RADIUS (0.3) is 50% bigger than
+        // AVATAR_RADIUS (0.2) - same angular spread eats up proportionally
+        // more of the AI pair's gap. 30f gives both sides real clearance
+        // (chord distance at this orbit radius comfortably clears even the
+        // bigger AI sprite diameter). This is a stopgap fixed layout, not
+        // the long-term design - Boo wants characters placed randomly on
+        // their planet when 2+ share one, and evenly distributed across
+        // planets once there are enough celestial bodies for each side to
+        // spread across - that's tracked for a later step (see
+        // PROJECT_STATE.md's Phase 30 section), not built here.
+        private const val CHARACTER_START_ANGLE_SPREAD_DEGREES = 30f
 
         // Converts a pull-back drag distance (world units) into launch
         // speed, clamped to MAX_MISSILE_SPEED so a wild drag can't fire an
