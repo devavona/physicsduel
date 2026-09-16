@@ -884,7 +884,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * later steps can grow [playerPlanets]/[aiPlanets] past size 1 without
      * touching either of those two call sites again. Everything else in
      * this file (rendering, drift, the horizon check, randomizePlanetPositions)
-     * still reads the original launchPlanet*/targetPlanet* fields directly -
+     * still reads the original [launchPlanetPosition]/[targetPlanetPosition]
+     * and [launchPlanetEntity]/[targetPlanetEntity] fields directly -
      * deliberately untouched this step (see the design note's "Step A" vs
      * "Step C" split) - [playerPlanets]/[aiPlanets] are just a thin,
      * always-in-sync view over those same fields for now.
