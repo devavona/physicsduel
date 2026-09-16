@@ -4433,3 +4433,7 @@ character combat plan from Phase 30. Two design questions asked directly
   tells the whole story on its own) and in the "Physics Dual" Claude Project's
   docs (so a brand-new chat can pick up context without touching Boo's PC at
   all). Keep both updated together at each phase checkpoint.
+- REVERT_TEST_MARKER: harmless throwaway line, added purely to test whether
+  a Gradle sync/Run in Android Studio silently reverts a committed external
+  file edit back to its previous content. Safe to delete once the test is
+  done either way.
