@@ -447,53 +447,45 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // a single +1'd constant naturally gives the AI +1 in both.
         private const val AI_MOVEMENT_STEPS_PER_PHASE = MOVEMENT_STEPS_PER_PHASE + 1
 
-        // Standard math convention (0 degrees = +X/east, 90 = +Y/north) -
-        // 90 starts the avatar at the top of the launch planet, roughly
-        // facing the target planet to its right.
-        private const val AVATAR_START_ANGLE_DEGREES = 90f
-
-        // Phase 14 - the AI's own starting angle around the target planet.
-        // Numerically identical to AVATAR_START_ANGLE_DEGREES (both mean
-        // "top of the planet, facing the other side") - kept as a separate
-        // constant since the two sides are independent and coincidence
-        // isn't the same as a shared meaning.
-        private const val AI_START_ANGLE_DEGREES = 90f
-
-        // Sept 2026 session - multi-character combat (Step 1). Two
-        // characters per side now share one planet (Boo, explicit:
-        // "characters can share a planet") - each pair starts this many
-        // degrees to either side of AVATAR_START_ANGLE_DEGREES/
-        // AI_START_ANGLE_DEGREES (which stay each side's *center* angle)
-        // so they don't spawn overlapping. Not exposed to Boo as a design
-        // question ("pick something reasonable" covered this too) - just
-        // enough clearance for two AVATAR_RADIUS/TARGET_RADIUS-sized
-        // characters at PLANET_RADIUS + LAUNCH_POINT_CLEARANCE to stand
-        // apart without touching.
+        // Sept 2026 session - "Planet/character scaling" design, Step B -
+        // replaces the old fixed AVATAR_START_ANGLE_DEGREES/
+        // AI_START_ANGLE_DEGREES/CHARACTER_START_ANGLE_SPREAD_DEGREES trio
+        // (a fixed "center facing direction ± a symmetric offset" scheme)
+        // with genuine random placement - Boo, explicit: "characters
+        // randomly on their planet when 2 on 1 planet." See
+        // assignCharacterStartAngles/randomAnglesWithMinSeparation.
         //
-        // Bumped 20f -> 30f the same session, on-device testing: the AI
-        // pair looked crowded/near-overlapping at 20f while the player
-        // pair looked fine, because TARGET_RADIUS (0.3) is 50% bigger than
-        // AVATAR_RADIUS (0.2) - same angular spread eats up proportionally
-        // more of the AI pair's gap. 30f gives both sides real clearance
-        // (chord distance at this orbit radius comfortably clears even the
-        // bigger AI sprite diameter). This is a stopgap fixed layout, not
-        // the long-term design - Boo wants characters placed randomly on
-        // their planet when 2+ share one, and evenly distributed across
-        // planets once there are enough celestial bodies for each side to
-        // spread across - that's tracked for a later step (see
-        // PROJECT_STATE.md's Phase 30 section), not built here.
-        private const val CHARACTER_START_ANGLE_SPREAD_DEGREES = 30f
+        // 60 degrees preserves the exact clearance the old fixed scheme
+        // worked out on-device (originally shipped as a ±30f spread, i.e.
+        // 60 degrees apart total): enough for two AVATAR_RADIUS/
+        // TARGET_RADIUS-sized characters at PLANET_RADIUS +
+        // LAUNCH_POINT_CLEARANCE (orbit radius ~1.1) to stand apart without
+        // touching, with the bigger TARGET_RADIUS (AI) sprite in mind (see
+        // the old constant's own now-removed doc comment for the on-device
+        // story: 20f looked crowded for the AI pair specifically, 30f/60-
+        // apart didn't). Used as a MINIMUM here rather than an exact value,
+        // so two characters sharing a planet can land anywhere from 60 to
+        // 300 degrees apart, never closer. ORDER_PICKER_TAP_RADIUS below
+        // still depends on this same figure to keep tap zones from
+        // overlapping - unchanged by this move to randomness since 60
+        // stayed 60, just enforced as a floor instead of an exact value.
+        private const val MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES = 60f
+        // Bounded reject-and-retry attempts for randomAnglesWithMinSeparation,
+        // same discipline PLANET_PLACEMENT_MAX_ATTEMPTS uses for planet
+        // positions - only matters if MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES
+        // times the number of characters sharing one planet gets close to
+        // 360 (not expected at today's CHARACTERS_PER_SIDE = 2).
+        private const val PLANET_ANGLE_PLACEMENT_MAX_ATTEMPTS = 50
 
         // Step 2 - multi-character combat: how close a touch has to land to
         // a living player character's own position to pick it in
         // PlayerOrderPickerInputProcessor. Deliberately generous for a
         // fingertip (well past AVATAR_RADIUS's 0.2) but still kept under
-        // half the chord distance between the two characters at
-        // CHARACTER_START_ANGLE_SPREAD_DEGREES's current 30 degrees (~1.1 at
-        // this orbit radius) so their tap zones can't overlap and make a tap
-        // ambiguous. Would need revisiting if that spread ever shrinks a lot,
-        // or once random per-round placement (PROJECT_STATE.md) replaces the
-        // fixed offsets entirely.
+        // half the chord distance at MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES's
+        // 60 degrees (~1.1 at this orbit radius) so two characters' tap
+        // zones can never overlap and make a tap ambiguous, even at that
+        // worst-case (minimum-allowed) separation. Would need revisiting if
+        // that minimum ever shrinks a lot.
         private const val ORDER_PICKER_TAP_RADIUS = 0.45f
 
         // Converts a pull-back drag distance (world units) into launch
@@ -560,8 +552,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // targetCharacterEntity (AI) fields - see PlayerCharacterState/
     // AiCharacterState's own doc comments below for what each list holds.
     // Both characters on a side share that side's one existing planet
-    // (launchPlanetPosition/targetPlanetPosition), at different starting
-    // angles - see CHARACTER_START_ANGLE_SPREAD_DEGREES. Fixed size
+    // (launchPlanetPosition/targetPlanetPosition), at different random
+    // starting angles - see assignCharacterStartAngles. Fixed size
     // CHARACTERS_PER_SIDE for this step; a real AI-targeting heuristic is
     // still deliberately deferred (Step 3 - see PROJECT_STATE.md). Step 2
     // (the player's own tap-to-choose turn-order picker) is now built -
@@ -893,15 +885,91 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private class Planet(val entity: Entity, val position: Vector2, val radius: Float)
     private lateinit var playerPlanets: List<Planet>
     private lateinit var aiPlanets: List<Planet>
-    // Step A placeholder assignment: every character just cycles through
-    // its side's planet list by index (`planets[i % planets.size]`), which
-    // is exactly "everyone shares the one planet" while playerPlanets/
-    // aiPlanets stay size 1 - i.e. today's actual behavior, unchanged. Step
-    // B replaces this function's body with the real rule ("share randomly-
-    // positioned when characters > planets, one-per-planet once planets >=
-    // characters") without any caller needing to change.
+    // Sept 2026 session - "Planet/character scaling" design. Cycling
+    // through the planet list by index (`planets[it % planets.size]`)
+    // turns out to already BE the real assignment rule, not just a Step A
+    // placeholder for it: when characterCount <= planets.size every index
+    // is < planets.size, so `it % planets.size == it` and each character
+    // lands on its own distinct planet (one-per-planet); when
+    // characterCount > planets.size, cycling round-robins characters
+    // across planets giving each one floor(characterCount/planets.size)
+    // or that +1 (as even as integer counts allow) - exactly "distribute
+    // evenly" for the excess. With playerPlanets/aiPlanets both size 1
+    // today, every index maps to 0, i.e. "everyone shares the one planet" -
+    // today's actual behavior, unchanged. What Step B actually needed to
+    // add was the WITHIN-a-shared-planet positioning - see
+    // [assignCharacterStartAngles] - not this function.
     private fun assignCharacterPlanets(planets: List<Planet>, characterCount: Int): List<Planet> =
         List(characterCount) { planets[it % planets.size] }
+
+    /**
+     * Sept 2026 session - "Planet/character scaling" design, Step B.
+     * Returns one start angle per character in [characterPlanets] (same
+     * index order), replacing the old fixed ±[MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES]
+     * symmetric-offset scheme - Boo: "characters randomly on their planet
+     * when 2 on 1 planet." Characters that ended up on the SAME [Planet]
+     * (by reference - two entries of [characterPlanets] pointing at the
+     * identical object, per [assignCharacterPlanets]'s cycling) are
+     * grouped and drawn together via [randomAnglesWithMinSeparation] so
+     * they can't spawn overlapping; a character with a planet to itself
+     * lands in a group of one and just gets a single uniformly-random
+     * angle, nothing to separate from. Judgment call, not confirmed with
+     * Boo specifically: angles are drawn from the character's whole planet
+     * (0-360, no preferred "facing the other side" direction) rather than
+     * restricted to an arc - matches "randomly on their planet" literally;
+     * easy to constrain to an arc later if that reads wrong on-device.
+     */
+    private fun assignCharacterStartAngles(characterPlanets: List<Planet>): List<Float> {
+        val result = arrayOfNulls<Float>(characterPlanets.size)
+        for ((_, indices) in characterPlanets.indices.groupBy { characterPlanets[it] }) {
+            val angles = randomAnglesWithMinSeparation(indices.size)
+            indices.forEachIndexed { position, characterIndex -> result[characterIndex] = angles[position] }
+        }
+        // Safe: characterPlanets.indices.groupBy above partitions every
+        // index into exactly one group, so every slot gets written before
+        // this line runs - the !! here documents that invariant rather
+        // than risking it silently.
+        return result.map { it!! }
+    }
+
+    /**
+     * [count] angles (degrees, 0 up to but not including 360) at least
+     * [MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES] apart pairwise (circular
+     * distance - see [angularDistanceDegrees]), via reject-and-retry per
+     * angle - same discipline [randomPlanetPosition] already uses for
+     * planet-to-planet spacing. `count <= 1` skips the separation check
+     * entirely, since a single angle has nothing to be too close to. Falls
+     * back to exact even spacing (360/count apart, from a random starting
+     * angle - still genuinely random, just not independently so) if random
+     * placement can't satisfy the minimum within
+     * [PLANET_ANGLE_PLACEMENT_MAX_ATTEMPTS] tries - only reachable in
+     * practice if [MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES] times
+     * [count] approaches 360, not the case at today's `CHARACTERS_PER_SIDE
+     * = 2`.
+     */
+    private fun randomAnglesWithMinSeparation(count: Int): List<Float> {
+        if (count <= 1) return List(count) { MathUtils.random(0f, 360f) }
+        val angles = ArrayList<Float>(count)
+        var attempts = 0
+        while (angles.size < count && attempts < PLANET_ANGLE_PLACEMENT_MAX_ATTEMPTS) {
+            val candidate = MathUtils.random(0f, 360f)
+            if (angles.none { angularDistanceDegrees(it, candidate) < MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES }) {
+                angles.add(candidate)
+            }
+            attempts++
+        }
+        if (angles.size < count) {
+            val start = MathUtils.random(0f, 360f)
+            return List(count) { (start + it * 360f / count) % 360f }
+        }
+        return angles
+    }
+
+    /** Shortest angular distance between [a] and [b] (degrees), accounting for the 0/360 wraparound - e.g. 350 and 10 are 20 apart, not 340. */
+    private fun angularDistanceDegrees(a: Float, b: Float): Float {
+        val diff = abs(a - b) % 360f
+        return minOf(diff, 360f - diff)
+    }
 
     // Sept 2026 session - direct Body references (same pattern as avatarBody/
     // targetCharacterBody above) purely so debugRenderer's overridden
@@ -1029,19 +1097,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // read at construction time.
         shotSpeedTuning = ShotSpeedTuning()
 
-        // Sept 2026 session - "Planet/character scaling" design, Step A -
-        // see [assignCharacterPlanets]'s doc comment. Both currently just
-        // cycle through a size-1 list, i.e. every character on a side
-        // shares that side's one planet - identical to today's actual
-        // behavior, just routed through the real assignment seam Step B
-        // will replace.
+        // Sept 2026 session - "Planet/character scaling" design. See
+        // assignCharacterPlanets/assignCharacterStartAngles' own doc
+        // comments - with playerPlanets/aiPlanets both size 1 today, every
+        // character on a side still shares that side's one planet, now at
+        // a genuinely random (not fixed ±) angle apart per Step B.
         val aiCharacterPlanets = assignCharacterPlanets(aiPlanets, CHARACTERS_PER_SIDE)
         val playerCharacterPlanets = assignCharacterPlanets(playerPlanets, CHARACTERS_PER_SIDE)
+        val aiCharacterStartAngles = assignCharacterStartAngles(aiCharacterPlanets)
+        val playerCharacterStartAngles = assignCharacterStartAngles(playerCharacterPlanets)
 
         // Sept 2026 session - multi-character combat (Step 1). Builds
         // CHARACTERS_PER_SIDE independent AiTurnControllers sharing
         // targetPlanetPosition (Boo: "characters can share a planet"), each
-        // at its own start angle (see CHARACTER_START_ANGLE_SPREAD_DEGREES)
+        // at its own random start angle (see assignCharacterStartAngles)
         // and its own collision category. onFire/onTurnComplete both
         // capture `aiCharacters[i]` - safe even though the `aiCharacters`
         // list itself isn't assigned until this whole expression finishes,
@@ -1049,14 +1118,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // ever invoked later during real gameplay.
         aiCharacters = (0 until CHARACTERS_PER_SIDE).map { i ->
             val category = if (i == 0) CATEGORY_AI_TARGET else CATEGORY_AI_TARGET_2
-            val startAngle = AI_START_ANGLE_DEGREES + if (i == 0) -CHARACTER_START_ANGLE_SPREAD_DEGREES else CHARACTER_START_ANGLE_SPREAD_DEGREES
             val controller = AiTurnController(
                 planetCenter = Vector2(aiCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
                 heightAboveSurface = LAUNCH_POINT_CLEARANCE,
                 stepsPerPhase = AI_MOVEMENT_STEPS_PER_PHASE,
                 stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
-                startAngleDegrees = startAngle,
+                startAngleDegrees = aiCharacterStartAngles[i],
                 aimSpeed = MAX_MISSILE_SPEED,
                 thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
                 // Step 3 - multi-character combat: was just
@@ -1112,14 +1180,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // here.
         playerCharacters = (0 until CHARACTERS_PER_SIDE).map { i ->
             val category = if (i == 0) CATEGORY_PLAYER_AVATAR else CATEGORY_PLAYER_AVATAR_2
-            val startAngle = AVATAR_START_ANGLE_DEGREES + if (i == 0) -CHARACTER_START_ANGLE_SPREAD_DEGREES else CHARACTER_START_ANGLE_SPREAD_DEGREES
             val controller = AvatarMovementController(
                 planetCenter = Vector2(playerCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
                 heightAboveSurface = LAUNCH_POINT_CLEARANCE,
                 stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
                 stepAngleDegrees = MOVEMENT_STEP_ANGLE_DEGREES,
-                startAngleDegrees = startAngle,
+                startAngleDegrees = playerCharacterStartAngles[i],
                 onTurnPassed = { advanceAfterPlayerFired(i) }
             )
             val body = createAvatarBody(controller.position, category)

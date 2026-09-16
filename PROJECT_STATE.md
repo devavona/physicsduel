@@ -3099,19 +3099,23 @@ field per side - there's no list, no N-planets concept anywhere yet.
 
 **Build broken into steps, same discipline multi-character combat's
 Steps 1-3 used:**
-- **Step A (next):** generalize the data model (`Planet` list, ownership
-  tag, `currentCelestialObstacles()` over the flat list) as a pure
-  refactor - zero visible behavior change, still exactly 2 planets/2
-  characters per side sharing via today's fixed offset. Confirms the
-  plumbing works before any new behavior rides on it.
-- **Step B:** replace the fixed symmetric-offset sharing with
-  random-on-planet positioning, and add the one-per-planet distribution
-  path for when planets >= characters (part 2 above) - this is where
-  "characters randomly on their planet... distribute evenly" actually
-  gets built.
-- **Step C:** generalize the placement algorithm itself (region-quota,
-  part 3 above) from exactly-2-planets to N, since Step A/B alone don't
-  yet let more than 2 planets actually exist per side.
+- **Step A - built, see Phase 33 below:** generalize the data model
+  (`Planet` list, ownership tag, `currentCelestialObstacles()` over the
+  flat list) as a pure refactor - zero visible behavior change, still
+  exactly 2 planets/2 characters per side sharing via today's fixed
+  offset. Confirms the plumbing works before any new behavior rides on
+  it.
+- **Step B - built, see Phase 33 below:** replace the fixed
+  symmetric-offset sharing with random-on-planet positioning, and add the
+  one-per-planet distribution path for when planets >= characters (part 2
+  above) - this is where "characters randomly on their planet...
+  distribute evenly" actually gets built. Turned out `assignCharacterPlanets`
+  from Step A already handled the one-per-planet-vs-share distribution
+  correctly on its own - Step B's real work was the *positioning* of
+  characters sharing a planet, not the distribution itself.
+- **Step C (next):** generalize the placement algorithm itself
+  (region-quota, part 3 above) from exactly-2-planets to N, since Step A/B
+  alone don't yet let more than 2 planets actually exist per side.
 - **Step D+:** the campaign ladder's own escalation content (5/20/30
   wins) and the field-size-cap formula - deliberately out of scope here,
   picked up once this machinery exists.
@@ -3183,6 +3187,111 @@ is really regression testing - confirm nothing from earlier phases broke:
    behave exactly as they did before this session. Any difference here
    would mean this refactor accidentally touched something it shouldn't
    have.
+
+✅ **DONE** - confirmed on-device ("play is as expected"). One real bug
+found and fixed along the way, worth flagging for future doc-comment
+writing: a KDoc comment in the original Step A commit contained the
+literal substring `*/` inside its prose (`launchPlanet*/targetPlanet*`),
+which is Kotlin's actual block-comment-close token - it silently
+terminated that comment early and everything after it in the file parsed
+as broken code (a wall of "Expecting member declaration" errors starting
+right where the comment should have still been open). Fixed in a
+follow-up commit by rewording the sentence; the lesson - never write a
+literal `*/` inside a `/** ... */` comment's text, even as shorthand like
+"field*/otherField*" - is now something to actively check for, not just
+avoid by luck.
+
+### Phase 33, Step B: random-on-planet positioning when characters share
+
+The second of the four steps from the "Planet/character scaling" design
+note above. Confirmed scope: replace the fixed ± symmetric-offset start
+angle with genuine randomness when characters share a planet, and make
+sure the one-per-planet case (not reachable yet - still exactly one
+planet per side until Step C) is handled correctly too.
+
+**A discovery, not just a build:** `assignCharacterPlanets` (Step A's
+"placeholder" cycling formula, `planets[it % planets.size]`) turned out
+to already BE the correct final assignment rule, not a stand-in for one -
+when characters ≤ planets it gives each character its own distinct
+planet (one-per-planet) automatically, since every index stays below
+`planets.size`; when characters > planets it round-robins them, giving
+each planet floor/ceil of an even split. So Step B needed zero changes to
+that function - what Boo's "characters randomly on their planet" design
+actually needed was the *positioning of characters already assigned to
+the same planet*, which the old fixed-offset scheme handled only for
+exactly two characters, hard-coded.
+
+**What's built**, all in `PlayScreen.kt`:
+- **`assignCharacterStartAngles(characterPlanets)`** (new) - one start
+  angle per character, same index order as its input. Groups characters
+  by which `Planet` *object* they were assigned to (reference equality,
+  not equal-by-value - two entries pointing at the identical `Planet`
+  instance from `assignCharacterPlanets`'s cycling means "these share a
+  planet"), then draws each group's angles together via
+  `randomAnglesWithMinSeparation` so a planet with multiple characters on
+  it never places them too close; a solo character (group size 1) just
+  gets one uniformly-random angle, nothing to check against.
+- **`randomAnglesWithMinSeparation(count)`** (new) - reject-and-retry, the
+  same discipline `randomPlanetPosition` already uses for planet spacing:
+  draw a random angle, keep it only if it's at least
+  `MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES` (60°) from every angle
+  already kept, up to `PLANET_ANGLE_PLACEMENT_MAX_ATTEMPTS` (50) tries
+  total, with an even-spacing fallback (still from a random starting
+  angle) if that bound is ever hit - only realistic once
+  `MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES × count` starts
+  approaching 360°, not the case at today's 2-per-side squads.
+- **60° chosen to exactly preserve the old scheme's clearance
+  guarantee**, not picked fresh: the removed `CHARACTER_START_ANGLE_SPREAD_DEGREES`
+  was a ±30° offset, i.e. 60° apart total - the value Phase 30's on-device
+  testing already confirmed gives both sides' sprite sizes (`AVATAR_RADIUS`/
+  the bigger `TARGET_RADIUS`) real clearance at this orbit radius. Using it
+  as a **minimum** rather than an exact value is the only actual change -
+  two characters sharing a planet can now land anywhere from 60° to 300°
+  apart, never closer, instead of always exactly 60° apart at a fixed base
+  direction. `ORDER_PICKER_TAP_RADIUS` (0.45) still depends on this same
+  60° figure to keep the two characters' tap zones from overlapping (see
+  that constant's own doc comment) - unaffected by this change since the
+  number itself didn't move, only how it's enforced.
+- **`AVATAR_START_ANGLE_DEGREES`/`AI_START_ANGLE_DEGREES` removed** - they
+  encoded "center of the fixed facing arc," which no longer means
+  anything once placement is random across the whole planet rather than
+  offset from a base direction. Nothing else in the file referenced them.
+
+**Judgment call, not confirmed with Boo specifically:** angles are drawn
+from the character's *entire* planet (0° to 360°, no preferred "facing
+the other side" direction), not restricted to an arc facing the opposing
+side the way the old fixed scheme implicitly did. This matches "randomly
+on their planet" literally, but means a character could now spawn facing
+away from the enemy planet entirely. Easy to constrain to an arc later if
+that reads wrong on-device - flagging it explicitly rather than deciding
+silently.
+
+**Not built this step:** the one-per-planet code path is written and
+should be correct (each character in its own group of one, per the
+`assignCharacterPlanets` discovery above), but isn't actually reachable
+yet - `playerPlanets`/`aiPlanets` stay size 1 until Step C, so today every
+character is still in a shared-planet group of exactly 2. Worth a
+specific on-device check once Step C lands multiple planets per side.
+
+#### How to test this phase on-device
+
+1. Build and run several fresh games in a row (each "New Game" reshuffles
+   planet positions, so each also reshuffles character start angles now).
+   Confirm each side's two characters land at a genuinely different
+   relative angle to each other from game to game - not always the same
+   fixed-looking spread as before.
+2. Across several games, confirm the two characters on a side never look
+   like they're touching or overlapping, and specifically watch the AI
+   pair (the bigger `TARGET_RADIUS` sprite) since that's the case Phase
+   30 had to bump the old fixed spread for.
+3. Confirm the Step 2 turn-order picker (tap-a-character-to-go-first)
+   still reliably picks whichever character you actually tap, even at the
+   new random angles - this is exactly what `ORDER_PICKER_TAP_RADIUS`'s
+   preserved 60°-minimum guarantee is protecting.
+4. General regression check: turn order, AI targeting/obstacle-avoidance,
+   drift, and the horizon/no-fire check should all still behave normally -
+   this step only touches where characters *start*, nothing about turn
+   flow or combat logic.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
