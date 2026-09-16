@@ -3038,26 +3038,151 @@ up:**
   (Phase 31, Step 2), and a real AI-targeting heuristic plus obstacle-
   avoidance polish (Phase 32, Step 3) are now all built - all three
   originally-planned steps are done. Squad-size flexibility beyond
-  fixed-2 is the one piece still open, unscheduled.
+  fixed-2, and the character placement/planet-scaling design below, are
+  what's left.
 - **Build order** for everything in this section - camera/pan-zoom
   landed first as planned (Phase 24), and multi-character combat's three
-  steps (Phase 30, 31, 32) have all now landed; the play-field-size cap
-  and scattered/region-quota placement are still unbuilt and unscheduled.
-- **Character placement, long-term** (Phase 30 on-device follow-up) -
-  Boo wants random placement for characters sharing one planet, even
-  distribution across planets once a side has enough of them, and
-  eventually scenes with more celestial bodies than characters. Fixed
-  symmetric offsets (`CHARACTER_START_ANGLE_SPREAD_DEGREES`) are a
-  stopgap only - not scheduled to a specific step yet.
+  steps (Phase 30, 31, 32) have all now landed; planet/character scaling
+  is next (see the design note immediately below), then the play-field-
+  size cap and the campaign ladder's actual escalation content.
 - **HUD/visual polish, project-wide priority.** Boo, after confirming
   Phase 31's turn-order prompt actually works but is easy to miss on
   first glance: "dont change anything there for now. once we get game
   mechanics more polished well come back to the HUD and other graphic
   elements." A general build-order call, not specific to the order-picker
   prompt alone - mechanics come before HUD/graphics passes across the
-  board until Boo says otherwise. Multi-character combat's three steps
-  are now all done (Phase 32); this still applies to whatever mechanics
-  work comes next.
+  board until Boo says otherwise.
+
+## Planet/character scaling: generalizing beyond fixed 2-per-side - captured design (Sept 2026 session, not yet built)
+
+Boo, right after Phase 32 closed out multi-character combat: "design
+planet placement/scaling first" - the piece needed before the campaign
+progression ladder's actual escalation content (5/20/30 wins, see
+"Campaign progression ladder" above) can be built, since that ladder
+assumes each side grows from 1 planet to 2 to 3 over time, and today's
+code hardcodes exactly one `launchPlanetPosition`/`targetPlanetPosition`
+field per side - there's no list, no N-planets concept anywhere yet.
+
+**Confirmed design, four parts:**
+1. **Data model.** Each side's planets become a `List<Planet>` (position,
+   radius, owning ECS entity for the existing gravity-source/health
+   lookups) instead of one fixed `Vector2` field per side.
+   `currentCelestialObstacles()` reads a flat list (the star plus every
+   planet on both sides) - ownership is just a label used for character
+   assignment (see below), not a physics or obstacle distinction, matching
+   the already-decided "fully scattered" placement choice (see "Planet/
+   character placement" above) - a planet blocks shots and drifts
+   characters the same way no matter which side it's tagged as belonging
+   to.
+2. **Character-to-planet assignment**, computed once at match start (not
+   live-rebalanced mid-match - a destroyed planet's characters just keep
+   drifting exactly like today, they don't get reassigned to a still-
+   living planet). If a side has more characters than planets, those
+   characters share a planet (randomly positioned on it, replacing
+   today's fixed symmetric-offset stopgap). Once a side has planets >=
+   characters, one character per planet instead. This matches Boo's own
+   stated long-term preference exactly (from the Phase 30 on-device
+   follow-up): "characters randomly on their planet when 2 on 1 planet.
+   if there are enough planets for each player, distribute evenly."
+3. **Placement algorithm.** Reuses the already-decided scattered +
+   region-quota rule (see "Planet/character placement" above), generalized
+   from exactly-2-planets to N - minimum-clearance reject/retry, plus the
+   region-quota layer that prevents corner-hoarding as the field grows.
+4. **Deliberately deferred, not part of this design:** the actual
+   play-field-size-cap formula and `WORLD_WIDTH`/`WORLD_HEIGHT` growth.
+   Nothing exercises a variable field size until the ladder itself starts
+   adding a 3rd+ planet, so a formula designed now would have nothing real
+   to validate against. This design only makes the machinery *capable* of
+   N planets/characters per side - the campaign ladder's own win-threshold
+   logic (still a future phase) is what will actually grow the counts,
+   and that's when the field-size question needs a real answer.
+
+**Build broken into steps, same discipline multi-character combat's
+Steps 1-3 used:**
+- **Step A (next):** generalize the data model (`Planet` list, ownership
+  tag, `currentCelestialObstacles()` over the flat list) as a pure
+  refactor - zero visible behavior change, still exactly 2 planets/2
+  characters per side sharing via today's fixed offset. Confirms the
+  plumbing works before any new behavior rides on it.
+- **Step B:** replace the fixed symmetric-offset sharing with
+  random-on-planet positioning, and add the one-per-planet distribution
+  path for when planets >= characters (part 2 above) - this is where
+  "characters randomly on their planet... distribute evenly" actually
+  gets built.
+- **Step C:** generalize the placement algorithm itself (region-quota,
+  part 3 above) from exactly-2-planets to N, since Step A/B alone don't
+  yet let more than 2 planets actually exist per side.
+- **Step D+:** the campaign ladder's own escalation content (5/20/30
+  wins) and the field-size-cap formula - deliberately out of scope here,
+  picked up once this machinery exists.
+
+## Phase 33: planet/character scaling, Step A (generalized data model, no behavior change)
+
+The first of the four steps from the design note immediately above.
+Confirmed scope going in: a pure refactor, zero visible behavior change -
+still exactly 2 planets/2 characters per side, sharing via today's fixed
+symmetric-offset placement. The point of this step is the plumbing, not
+new behavior.
+
+**What's built**, all in `PlayScreen.kt`:
+- **New `Planet` class** (position, radius, owning ECS entity) and two new
+  `playerPlanets`/`aiPlanets: List<Planet>` fields, built once in `init{}`
+  right after `launchPlanetEntity`/`targetPlanetEntity` exist - each list
+  is size 1 today, wrapping the exact same `launchPlanetPosition`/
+  `targetPlanetPosition`/`*PlanetEntity` fields that already existed.
+  Deliberately not a replacement for those fields - they stay exactly as
+  they were, still read directly by rendering, drift/landing, the horizon
+  check, and `randomizePlanetPositions` (all untouched this step, per the
+  design note's Step A/Step C split). `playerPlanets`/`aiPlanets` are a
+  thin, always-in-sync view for the two things that actually needed to
+  start reading a list: obstacle-building and character-to-planet
+  assignment.
+- **`currentCelestialObstacles()` generalized.** Used to read from a fixed
+  3-element `celestialObstacles` list (star/launch/target by hardcoded
+  index) built once at init. Now builds the result fresh from
+  `playerPlanets`/`aiPlanets` each call - same star-plus-every-non-
+  destroyed-planet result as before (byte-identical positions/radii/
+  filtering for today's exactly-2-planet case), but with no fixed-index
+  assumption left anywhere, so it's already correct for however many
+  planets either list holds once Step C lands. The old `celestialObstacles`
+  field is gone.
+- **New `assignCharacterPlanets(planets, characterCount)` seam.** Computed
+  once in `init{}` for each side (`aiCharacterPlanets`/
+  `playerCharacterPlanets`, each size `CHARACTERS_PER_SIDE`), and threaded
+  into the `aiCharacters`/`playerCharacters` construction in place of the
+  old direct `targetPlanetPosition`/`launchPlanetPosition` reads. Its Step
+  A body is deliberately trivial - `planets[i % planets.size]` - which
+  with a size-1 list means every character maps to index 0, i.e. exactly
+  "everyone shares the one planet," identical to today's real behavior.
+  Step B replaces only this function's body (share-randomly-positioned
+  when characters > planets, one-per-planet once planets >= characters)
+  with every caller unchanged.
+
+**Not built this step (by design - see Phase 33's own step breakdown
+above):** the random-when-sharing/one-per-planet assignment logic itself
+(Step B), letting `playerPlanets`/`aiPlanets` actually hold more than one
+planet (Step C - `randomizePlanetPositions`/`randomPlanetPosition`/planet-
+body creation are all still hardcoded to exactly one draw per side), and
+the campaign ladder's own escalation content (Step D+).
+
+#### How to test this phase on-device
+
+This step is a pure refactor with no intended behavior change, so testing
+is really regression testing - confirm nothing from earlier phases broke:
+1. Build and run a full 2v2 match as normal. Planets should still be
+   randomly placed each new game exactly as before (Phase 20), both
+   characters per side should still start at their usual spread-out
+   positions on their one shared planet (Phase 30).
+2. Destroy a planet (either side's) and confirm the "ghost obstacle" fix
+   still holds - AI aim search and your own aim preview should both stop
+   treating the destroyed planet's old position as solid the instant it's
+   gone, same as before this refactor.
+3. General playthrough - turn order (Phase 31), AI targeting/obstacle-
+   avoidance (Phase 32), drift-when-your-planet-is-destroyed (Phase 29),
+   and the horizon/no-fire-below-your-own-planet check should all still
+   behave exactly as they did before this session. Any difference here
+   would mean this refactor accidentally touched something it shouldn't
+   have.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 

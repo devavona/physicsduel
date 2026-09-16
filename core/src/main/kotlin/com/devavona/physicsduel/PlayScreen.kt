@@ -600,14 +600,6 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // later in init{}) - safe because that callback only ever fires from
     // real touch input during play, long after init{} has fully finished.
     private lateinit var cameraGestureController: CameraGestureController
-    // Phase 16 - shared between aiTurnController's obstacle list and the
-    // player's own aim preview (see renderAimTrajectoryPreview), so both
-    // read the same geometry instead of two copies that could drift. Fixed
-    // geometry, built once at init{} - index 0 is always the star, 1 the
-    // launch planet, 2 the target planet (see the init{} construction
-    // site). Sept 2026 session - this fixed list alone is no longer what
-    // either consumer reads from; see [currentCelestialObstacles].
-    private lateinit var celestialObstacles: List<AiTurnController.Obstacle>
     private lateinit var trajectorySimulator: TrajectorySimulator
 
     // Sept 2026 session - see snapCameraToActiveAvatar's doc comment and
@@ -883,6 +875,33 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     /** Same pattern as [targetPlanetEntity], for the launch planet once it also became a real gravity source - see that field's doc comment. */
     private lateinit var launchPlanetEntity: Entity
 
+    /**
+     * Sept 2026 session - "Planet/character scaling" design (see
+     * PROJECT_STATE.md), Step A. A side-agnostic wrapper around one
+     * planet's geometry/entity - [currentCelestialObstacles] and
+     * [assignCharacterPlanets] both read these lists rather than reaching
+     * for [launchPlanetPosition]/[targetPlanetPosition] directly, so
+     * later steps can grow [playerPlanets]/[aiPlanets] past size 1 without
+     * touching either of those two call sites again. Everything else in
+     * this file (rendering, drift, the horizon check, randomizePlanetPositions)
+     * still reads the original launchPlanet*/targetPlanet* fields directly -
+     * deliberately untouched this step (see the design note's "Step A" vs
+     * "Step C" split) - [playerPlanets]/[aiPlanets] are just a thin,
+     * always-in-sync view over those same fields for now.
+     */
+    private class Planet(val entity: Entity, val position: Vector2, val radius: Float)
+    private lateinit var playerPlanets: List<Planet>
+    private lateinit var aiPlanets: List<Planet>
+    // Step A placeholder assignment: every character just cycles through
+    // its side's planet list by index (`planets[i % planets.size]`), which
+    // is exactly "everyone shares the one planet" while playerPlanets/
+    // aiPlanets stay size 1 - i.e. today's actual behavior, unchanged. Step
+    // B replaces this function's body with the real rule ("share randomly-
+    // positioned when characters > planets, one-per-planet once planets >=
+    // characters") without any caller needing to change.
+    private fun assignCharacterPlanets(planets: List<Planet>, characterCount: Int): List<Planet> =
+        List(characterCount) { planets[it % planets.size] }
+
     // Sept 2026 session - direct Body references (same pattern as avatarBody/
     // targetCharacterBody above) purely so debugRenderer's overridden
     // renderBody can identify and skip exactly these three bodies by
@@ -993,20 +1012,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         engine.addEntity(targetPlanetEntity)
 
-        // Phase 14 - built here (before the target character body) since
-        // createTarget() below now seeds the body's position from
-        // aiTurnController.position instead of a separately-hardcoded
-        // formula. Shared with PlayScreen's own Phase 16 aim preview (see
-        // renderAimTrajectoryPreview) - fixed geometry (center + radius),
-        // not live Box2D references - see AiTurnController.Obstacle's doc
-        // comment. Order matters: index 0 is always the star, 1 the launch
-        // planet, 2 the target planet - see currentCelestialObstacles,
-        // which is what both consumers actually read from now.
-        celestialObstacles = listOf(
-            AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS),
-            AiTurnController.Obstacle(Vector2(launchPlanetPosition), PLANET_RADIUS),
-            AiTurnController.Obstacle(Vector2(targetPlanetPosition), PLANET_RADIUS)
-        )
+        // Sept 2026 session - "Planet/character scaling" design, Step A -
+        // see [Planet]'s own doc comment. Size 1 each today; the star
+        // itself isn't in either list since it's side-less and never
+        // destroyed - [currentCelestialObstacles] adds it separately.
+        playerPlanets = listOf(Planet(launchPlanetEntity, launchPlanetPosition, PLANET_RADIUS))
+        aiPlanets = listOf(Planet(targetPlanetEntity, targetPlanetPosition, PLANET_RADIUS))
         trajectorySimulator = TrajectorySimulator(GravitySystem.G, GravitySystem.MIN_DISTANCE)
 
         // shotSpeedTuning is referenced below by shotSpeedMultiplier/
@@ -1016,6 +1027,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // ever invoked during real gameplay well after init{} finishes, not
         // read at construction time.
         shotSpeedTuning = ShotSpeedTuning()
+
+        // Sept 2026 session - "Planet/character scaling" design, Step A -
+        // see [assignCharacterPlanets]'s doc comment. Both currently just
+        // cycle through a size-1 list, i.e. every character on a side
+        // shares that side's one planet - identical to today's actual
+        // behavior, just routed through the real assignment seam Step B
+        // will replace.
+        val aiCharacterPlanets = assignCharacterPlanets(aiPlanets, CHARACTERS_PER_SIDE)
+        val playerCharacterPlanets = assignCharacterPlanets(playerPlanets, CHARACTERS_PER_SIDE)
 
         // Sept 2026 session - multi-character combat (Step 1). Builds
         // CHARACTERS_PER_SIDE independent AiTurnControllers sharing
@@ -1030,7 +1050,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             val category = if (i == 0) CATEGORY_AI_TARGET else CATEGORY_AI_TARGET_2
             val startAngle = AI_START_ANGLE_DEGREES + if (i == 0) -CHARACTER_START_ANGLE_SPREAD_DEGREES else CHARACTER_START_ANGLE_SPREAD_DEGREES
             val controller = AiTurnController(
-                planetCenter = Vector2(targetPlanetPosition),
+                planetCenter = Vector2(aiCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
                 heightAboveSurface = LAUNCH_POINT_CLEARANCE,
                 stepsPerPhase = AI_MOVEMENT_STEPS_PER_PHASE,
@@ -1093,7 +1113,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             val category = if (i == 0) CATEGORY_PLAYER_AVATAR else CATEGORY_PLAYER_AVATAR_2
             val startAngle = AVATAR_START_ANGLE_DEGREES + if (i == 0) -CHARACTER_START_ANGLE_SPREAD_DEGREES else CHARACTER_START_ANGLE_SPREAD_DEGREES
             val controller = AvatarMovementController(
-                planetCenter = Vector2(launchPlanetPosition),
+                planetCenter = Vector2(playerCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
                 heightAboveSurface = LAUNCH_POINT_CLEARANCE,
                 stepsPerPhase = MOVEMENT_STEPS_PER_PHASE,
@@ -1681,29 +1701,39 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private fun engineHasEntity(entity: Entity): Boolean = engine.entities.any { it === entity }
 
     /**
-     * Sept 2026 session - fixes a "ghost obstacle" bug: [celestialObstacles]
-     * is fixed geometry built once at init{} from wherever the star/planets
+     * Sept 2026 session - fixes a "ghost obstacle" bug: obstacles used to
+     * be fixed geometry built once at init{} from wherever the star/planets
      * happened to spawn, with no live link back to the actual Ashley
      * entities/Box2D bodies. Once a planet is genuinely destroyed
      * ([ProjectileContactListener.flushRemovals] tears down its real body
-     * and entity), the fixed list never noticed - the AI's own aim search
+     * and entity), that fixed list never noticed - the AI's own aim search
      * ([AiTurnController.searchAim]/[reposition]) and the player's own
      * [renderAimTrajectoryPreview] would both keep treating that planet's
      * old position as solid ground forever, even though a real fired shot
      * flies straight through it with nothing there to stop it. Called
-     * fresh wherever either consumer used to just read [celestialObstacles]
-     * directly, so a destroyed planet actually drops out the instant it's
-     * gone - relies on [celestialObstacles]'s fixed index order (0 = star,
-     * 1 = launch planet, 2 = target planet) to match each entry back to the
-     * right [GravitySourceComponent.isDestroyed] check. The star is never
+     * fresh wherever either consumer needs the current obstacle set, so a
+     * destroyed planet actually drops out the instant it's gone.
+     *
+     * "Planet/character scaling" design, Step A - now reads [playerPlanets]/
+     * [aiPlanets] instead of a fixed-index 3-element list, so this already
+     * scales to however many planets either list ends up holding once Step
+     * C generalizes placement past exactly one per side; the star is never
      * filtered - it's not damageable in the first place (see
      * [GravitySourceComponent.isDamageable]).
      */
     private fun currentCelestialObstacles(): List<AiTurnController.Obstacle> {
-        val result = ArrayList<AiTurnController.Obstacle>(3)
-        result.add(celestialObstacles[0]) // the star - never destroyed
-        if (!gravitySourceMapper.get(launchPlanetEntity).isDestroyed) result.add(celestialObstacles[1])
-        if (!gravitySourceMapper.get(targetPlanetEntity).isDestroyed) result.add(celestialObstacles[2])
+        val result = ArrayList<AiTurnController.Obstacle>(1 + playerPlanets.size + aiPlanets.size)
+        result.add(AiTurnController.Obstacle(Vector2(STAR_X, STAR_Y), STAR_RADIUS)) // never destroyed
+        for (planet in playerPlanets) {
+            if (!gravitySourceMapper.get(planet.entity).isDestroyed) {
+                result.add(AiTurnController.Obstacle(Vector2(planet.position), planet.radius))
+            }
+        }
+        for (planet in aiPlanets) {
+            if (!gravitySourceMapper.get(planet.entity).isDestroyed) {
+                result.add(AiTurnController.Obstacle(Vector2(planet.position), planet.radius))
+            }
+        }
         return result
     }
 
@@ -2466,8 +2496,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * released, so there's no live velocity to read mid-drag). Drawn as
      * dots, not a solid line, so it never looks like [renderProjectileTrails]'s
      * "this already happened" trail - this is only a projection, and stops
-     * early (per [celestialObstacles]) if the predicted path would hit a
-     * planet or the star before the preview window runs out.
+     * early (per [currentCelestialObstacles]) if the predicted path would
+     * hit a planet or the star before the preview window runs out.
      *
      * **Sept 2026 session revision.** Boo, on the original hide-it-below-
      * horizon behavior: "the way the aiming dots disappear when aiming
