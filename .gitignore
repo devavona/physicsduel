@@ -7,3 +7,7 @@ build/
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Files/screenshots Claude sends into this folder during sessions - not
+# part of the actual project, shouldn't be tracked.
+Claude outputs/
