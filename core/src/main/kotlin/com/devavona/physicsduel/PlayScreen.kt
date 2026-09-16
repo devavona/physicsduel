@@ -484,6 +484,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // PROJECT_STATE.md's Phase 30 section), not built here.
         private const val CHARACTER_START_ANGLE_SPREAD_DEGREES = 30f
 
+        // Step 2 - multi-character combat: how close a touch has to land to
+        // a living player character's own position to pick it in
+        // PlayerOrderPickerInputProcessor. Deliberately generous for a
+        // fingertip (well past AVATAR_RADIUS's 0.2) but still kept under
+        // half the chord distance between the two characters at
+        // CHARACTER_START_ANGLE_SPREAD_DEGREES's current 30 degrees (~1.1 at
+        // this orbit radius) so their tap zones can't overlap and make a tap
+        // ambiguous. Would need revisiting if that spread ever shrinks a lot,
+        // or once random per-round placement (PROJECT_STATE.md) replaces the
+        // fixed offsets entirely.
+        private const val ORDER_PICKER_TAP_RADIUS = 0.45f
+
         // Converts a pull-back drag distance (world units) into launch
         // speed, clamped to MAX_MISSILE_SPEED so a wild drag can't fire an
         // unreasonably fast shot.
@@ -536,17 +548,31 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // Both characters on a side share that side's one existing planet
     // (launchPlanetPosition/targetPlanetPosition), at different starting
     // angles - see CHARACTER_START_ANGLE_SPREAD_DEGREES. Fixed size
-    // CHARACTERS_PER_SIDE for this step; a player-facing turn-order picker
-    // and a real AI-targeting heuristic are deliberately deferred (Step
-    // 2/Step 3 - see PROJECT_STATE.md).
+    // CHARACTERS_PER_SIDE for this step; a real AI-targeting heuristic is
+    // still deliberately deferred (Step 3 - see PROJECT_STATE.md). Step 2
+    // (the player's own tap-to-choose turn-order picker) is now built -
+    // see awaitingPlayerOrderPick/beginPlayerOrderPick.
     private lateinit var playerCharacters: List<PlayerCharacterState>
     private lateinit var aiCharacters: List<AiCharacterState>
     // Whole-squad-then-whole-squad turn order (Boo, explicit: "fixed squad
     // first"): within one side's turn, its characters act in this fixed
     // index order (0 then 1) - see advanceAfterPlayerFired/
-    // advanceAfterAiFired. No player-facing order-picker yet (Step 2).
+    // advanceAfterAiFired. Which index goes *first* each round, on the
+    // player's side, is now the player's own tap-to-choose call (Step 2 -
+    // see awaitingPlayerOrderPick) rather than always index 0; the AI side
+    // still always starts from its fixed index 0 (no equivalent picker for
+    // the AI - Step 3's real targeting heuristic is a separate concern).
     private var activePlayerIndex = 0
     private var activeAiIndex = 0
+    // Step 2 - multi-character combat: true only during the brief window
+    // between the AI's squad finishing its round and the player tapping
+    // which of their own two living characters acts first - see
+    // beginPlayerOrderPick/PlayerOrderPickerInputProcessor. Never true when
+    // only one player character is still alive (nothing to choose between -
+    // handOffToPlayer activates the sole survivor directly), and always
+    // cleared the instant activatePlayerCharacter runs, regardless of
+    // whether that happened via a tap or the no-choice-needed path.
+    private var awaitingPlayerOrderPick = false
     // Sept 2026 session - a "turn" used to mean one AvatarMovementController
     // .turnNumber tick; with CHARACTERS_PER_SIDE independent controllers per
     // side that number no longer means anything as an overall counter, so
@@ -608,6 +634,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         var drifting = false
         var driftResolved = false
         var driftFrozenVelocity: Vector2? = null
+        // Step 2 - multi-character combat: true once this character has
+        // fired this round. Reset false for every living character at the
+        // start of each player round (see handOffToPlayer), set true in
+        // advanceAfterPlayerFired the instant it fires. Needed because Step
+        // 2 lets the player tap either character to go first - with the
+        // starting index no longer fixed at 0, advanceAfterPlayerFired can't
+        // assume "the next index up" is always the teammate who hasn't gone
+        // yet (tapping index 1 first, for a fixed CHARACTERS_PER_SIDE = 2,
+        // would leave nothing "after" it to find that way) - so it looks for
+        // any living character with actedThisRound still false instead.
+        // AiCharacterState has no equivalent: the AI side has no order
+        // picker, so its fixed-index-order assumption still holds.
+        var actedThisRound = false
     }
 
     /** The AI-side twin of [PlayerCharacterState] - see that class's doc comment. */
@@ -675,6 +714,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // touch during the AI's turn simply falls through to nothing.
     private lateinit var fullInputProcessor: InputMultiplexer
     private lateinit var restrictedInputProcessor: InputMultiplexer
+    // Step 2 - multi-character combat: swapped in only during
+    // awaitingPlayerOrderPick (see beginPlayerOrderPick) - lets the camera/
+    // back/debug controllers keep working exactly like restrictedInputProcessor
+    // does during the AI's turn, but adds PlayerOrderPickerInputProcessor so
+    // a tap on either living player character's sprite can pick it.
+    private lateinit var orderPickerInputProcessor: InputMultiplexer
     private lateinit var projectileContactListener: ProjectileContactListener
     private lateinit var launchPoint: Vector2
     private lateinit var gravitySystem: GravitySystem
@@ -1106,6 +1151,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
         }
+        // Step 2 - multi-character combat: the player's own turn-order
+        // picker's InputMultiplexer, swapped in only during
+        // awaitingPlayerOrderPick (see beginPlayerOrderPick). Same
+        // always-on set as restrictedInputProcessor (camera/back/debug still
+        // work while the picker is up) plus PlayerOrderPickerInputProcessor
+        // in place of the normal movement/aim controllers.
+        orderPickerInputProcessor = InputMultiplexer().apply {
+            addProcessor(cameraGestureController)
+            addProcessor(BackKeyHandler())
+            addProcessor(gravityDebugController)
+            addProcessor(shotSpeedDebugController)
+            addProcessor(PlayerOrderPickerInputProcessor())
+        }
         Gdx.input.inputProcessor = fullInputProcessor
         Gdx.input.setCatchKey(Input.Keys.BACK, true) // otherwise Android treats Back as "quit app"
         resizeHudCamera()
@@ -1120,6 +1178,38 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             if (keycode == Input.Keys.BACK) {
                 game.setScreen(PauseScreen(game, playScreen = this@PlayScreen))
                 return true
+            }
+            return false
+        }
+    }
+
+    /**
+     * Step 2 - multi-character combat: active only while
+     * [awaitingPlayerOrderPick] is true (via [orderPickerInputProcessor] -
+     * see [beginPlayerOrderPick]). A touch within [ORDER_PICKER_TAP_RADIUS]
+     * of either still-living player character's own position picks it to
+     * act first this round by calling [activatePlayerCharacter] directly -
+     * same method every other path into a player character's turn already
+     * uses, so nothing downstream needs to know a tap picked it rather than
+     * the no-choice-needed or mid-round teammate-handoff paths. A touch that
+     * doesn't land on either living character simply falls through
+     * (returns false) - nothing else is listening for it while this
+     * processor is active, so it's silently ignored, same as an aim-drag
+     * started too far from the launch point already does in
+     * SlingshotInputProcessor.
+     */
+    private inner class PlayerOrderPickerInputProcessor : InputAdapter() {
+        private val touchPoint = Vector2()
+
+        override fun touchDown(screenX: Int, screenY: Int, pointer: Int, button: Int): Boolean {
+            viewport.unproject(touchPoint.set(screenX.toFloat(), screenY.toFloat()))
+            for (i in playerCharacters.indices) {
+                val pc = playerCharacters[i]
+                if (healthMapper.get(pc.entity).isDefeated) continue
+                if (touchPoint.dst(pc.controller.position) <= ORDER_PICKER_TAP_RADIUS) {
+                    activatePlayerCharacter(i)
+                    return true
+                }
             }
             return false
         }
@@ -1173,20 +1263,33 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * see AvatarMovementController.onFired's doc comment. Restricting input
      * immediately (regardless of who acts next) preserves the original
      * single-character invariant that only one shot is ever in flight at a
-     * time. Whole-squad-then-whole-squad, fixed index order (Boo: "fixed
-     * squad first") - if a later, still-living player character hasn't
-     * acted yet this round, control passes to it; otherwise the whole
-     * side's turn is over and control passes to the AI's first living
-     * character. Wrapped the same shotResolved/pendingTurnHandoff way the
-     * old single-character giveControlToPlayer/startAiTurn were - see that
-     * field's doc comment - since fireMissile() (called just before
-     * onFired(), which is what invokes onTurnPassed) always leaves
-     * shotResolved false for the shot just fired.
+     * time. Whole-squad-then-whole-squad: if a still-living player
+     * character hasn't acted yet this round, control passes to it;
+     * otherwise the whole side's turn is over and control passes to the
+     * AI's first living character. Wrapped the same shotResolved/
+     * pendingTurnHandoff way the old single-character giveControlToPlayer/
+     * startAiTurn were - see that field's doc comment - since fireMissile()
+     * (called just before onFired(), which is what invokes onTurnPassed)
+     * always leaves shotResolved false for the shot just fired.
+     *
+     * Step 2 - multi-character combat: used to just look for
+     * `firstLivingPlayerIndexFrom(finishedIndex + 1)`, back when index 0
+     * always went first and index 1 always went second (Boo: "fixed squad
+     * first"). Now that the player can tap either character to go first
+     * (see beginPlayerOrderPick), "the next index up" no longer means "the
+     * teammate who hasn't gone yet" - tapping index 1 first would leave
+     * nothing after it to find that way. [PlayerCharacterState
+     * .actedThisRound] tracks this properly instead: whichever living
+     * character doesn't have it set yet goes next, regardless of index
+     * order.
      */
     private fun advanceAfterPlayerFired(finishedIndex: Int) {
         Gdx.input.inputProcessor = restrictedInputProcessor
+        playerCharacters[finishedIndex].actedThisRound = true
         val handoff = {
-            val next = firstLivingPlayerIndexFrom(finishedIndex + 1)
+            val next = playerCharacters.indices.firstOrNull {
+                !healthMapper.get(playerCharacters[it].entity).isDefeated && !playerCharacters[it].actedThisRound
+            }
             if (next != null) activatePlayerCharacter(next) else handOffToAi()
         }
         if (!shotResolved) pendingTurnHandoff = handoff else handoff()
@@ -1205,11 +1308,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * Gives control to [index]'s player character - freezing it first if
      * it's mid-drift (see freezeDrift's doc comment), so it aims/fires from
      * a stable spot - re-enabling full input (whether this is a teammate
-     * taking over mid-round or the next round's first character), and
-     * snapping the camera to it. Called from [advanceAfterPlayerFired] and
-     * [handOffToPlayer].
+     * taking over mid-round, the next round's sole survivor, or a tap from
+     * [PlayerOrderPickerInputProcessor]), and snapping the camera to it.
+     * Called from [advanceAfterPlayerFired], [handOffToPlayer], and the
+     * order picker. Always clears [awaitingPlayerOrderPick] - harmless when
+     * it was already false (every path but the picker's own tap).
      */
     private fun activatePlayerCharacter(index: Int) {
+        awaitingPlayerOrderPick = false
         activePlayerIndex = index
         Gdx.input.inputProcessor = fullInputProcessor
         val pc = playerCharacters[index]
@@ -1243,11 +1349,48 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         activateAiCharacter(nextAi)
     }
 
-    /** Hands the whole side's turn from the AI back to the player - called once the AI's last living character has fired - and advances [roundNumber]. */
+    /**
+     * Hands the whole side's turn from the AI back to the player - called
+     * once the AI's last living character has fired - and advances
+     * [roundNumber]. Step 2 - multi-character combat: if more than one
+     * player character is still alive, this is the player's own call which
+     * one goes first (Boo, explicit: "tap the character's sprite... every
+     * round"), so it starts [beginPlayerOrderPick] instead of auto-picking
+     * an index; with only one survivor there's nothing to choose, so it
+     * activates that one directly, same as before Step 2 existed.
+     */
     private fun handOffToPlayer() {
         roundNumber++
-        val nextPlayer = firstLivingPlayerIndexFrom(0) ?: return
-        activatePlayerCharacter(nextPlayer)
+        // Step 2 - fresh round, fresh "who's gone yet" tracking - see
+        // PlayerCharacterState.actedThisRound's doc comment. Reset for every
+        // character (not just the living ones) purely so a defeated
+        // character's stale `true` from a previous round can never
+        // accidentally read as meaningful again.
+        playerCharacters.forEach { it.actedThisRound = false }
+        val livingCount = playerCharacters.count { !healthMapper.get(it.entity).isDefeated }
+        when {
+            livingCount == 0 -> return // no one left - the post-shot win/loss check (see render()) ends the run
+            livingCount == 1 -> activatePlayerCharacter(firstLivingPlayerIndexFrom(0)!!)
+            else -> beginPlayerOrderPick()
+        }
+    }
+
+    /**
+     * Step 2 - multi-character combat: starts the player's own turn-order
+     * pick - see [awaitingPlayerOrderPick]'s and
+     * [PlayerOrderPickerInputProcessor]'s doc comments. Only ever called
+     * from [handOffToPlayer] when at least two of the player's characters
+     * are still alive, so there's a genuine choice to make. Reframes the
+     * camera on the shared planet itself (not a specific character - Boo
+     * hasn't tapped one yet) at the same [AVATAR_SNAP_ZOOM] every other
+     * turn-transition uses, which already shows the whole planet clearly
+     * (see that constant's doc comment) - plenty to see and tap either
+     * living character on it.
+     */
+    private fun beginPlayerOrderPick() {
+        awaitingPlayerOrderPick = true
+        Gdx.input.inputProcessor = orderPickerInputProcessor
+        snapCameraToActiveAvatar(launchPlanetPosition)
     }
 
     /**
@@ -2471,6 +2614,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * paragraph), so drawing live but dead buttons would just be confusing.
      */
     private fun renderMovementControls() {
+        // Step 2 - multi-character combat: activePlayerIndex still points at
+        // whoever last had the turn while awaitingPlayerOrderPick is true
+        // (it isn't updated until a tap actually picks someone - see
+        // activatePlayerCharacter), so without this check these buttons
+        // would render, live but non-functional (the picker's input
+        // processor doesn't wire them up), which would just be confusing.
+        if (awaitingPlayerOrderPick) return
         val pc = activePlayerCharacter()
         if (pc.drifting) return
         val leftRect = pc.controller.leftButtonRect
@@ -2543,6 +2693,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             "Round $roundNumber - Shot in flight..."
         } else if (aiCharacters.any { it.controller.isTurnActive }) {
             "Round $roundNumber - AI's turn..."
+        } else if (awaitingPlayerOrderPick) {
+            // Step 2 - multi-character combat: shown only in the brief
+            // window between the AI's round ending and the player tapping
+            // which of their own two living characters acts first - see
+            // beginPlayerOrderPick. activePlayerIndex is stale here (still
+            // whoever last acted), so the normal "P%d" branch below would be
+            // actively misleading rather than just uninformative.
+            "Round $roundNumber - Tap a character to act first"
         } else {
             // Sept 2026 session - no more Pre-shot/Post-shot split (post-shot
             // movement was removed entirely) - just one budget, spent before

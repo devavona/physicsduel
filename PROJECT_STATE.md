@@ -2885,7 +2885,7 @@ near the character doesn't accidentally cancel.
    aim line once the cancel is armed)? Not built - flagging as an easy
    follow-up if it feels too hidden.
 
-## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session; turn order/fixed-squad now built, see Phase 30 below)
+## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session; turn order/fixed-squad (Phase 30) and the player's turn-order picker (Phase 31) now built, see below)
 
 Picked back up from the "escalation ladder" backlog item - the ladder's
 own design (see "Campaign progression ladder" above and Phase 23 below)
@@ -3038,10 +3038,11 @@ up:**
   (Phase 30, Step 1) - a real targeting heuristic and any squad-size
   flexibility beyond fixed-2 are still open (Step 3 and beyond).
 - **Build order** for everything in this section - camera/pan-zoom
-  landed first as planned (Phase 24), and multi-character combat's
-  Step 1 (fixed squads + turn order, Phase 30) has now landed too; the
-  play-field-size cap and scattered/region-quota placement are still
-  unbuilt and unscheduled.
+  landed first as planned (Phase 24), and multi-character combat's Step 1
+  (fixed squads + turn order, Phase 30) and Step 2 (the player's own
+  turn-order picker, Phase 31) have now landed too; the play-field-size
+  cap and scattered/region-quota placement are still unbuilt and
+  unscheduled.
 - **Character placement, long-term** (Phase 30 on-device follow-up) -
   Boo wants random placement for characters sharing one planet, even
   distribution across planets once a side has enough of them, and
@@ -3963,8 +3964,8 @@ steps, confirmed with Boo before starting: **Step 1** (this phase) -
 replace the singular player/AI characters with fixed 2-per-side squads,
 sharing each side's existing one planet, whole-squad-then-whole-squad
 turn order in a fixed index sequence (no player-facing order picker
-yet). **Step 2** (not started) - a tap-to-choose UI for the player's own
-turn order within their squad. **Step 3** (not started) - a real AI
+yet). **Step 2** (now built, see Phase 31 below) - a tap-to-choose UI for
+the player's own turn order within their squad. **Step 3** (not started) - a real AI
 targeting heuristic (lowest-current-HP proposed) plus an on-device
 polish pass for issues specific to sharing a planet (crowding, aim
 obstruction between teammates).
@@ -4062,8 +4063,8 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
   flight...` turn label.
 
 **Not built this step (deliberately deferred):**
-- A player-facing turn-order-picker UI (Step 2) - order is a fixed
-  index sequence (character 0, then 1) for now.
+- A player-facing turn-order-picker UI - order was a fixed index sequence
+  (character 0, then 1) in this step. Built in Phase 31 (Step 2, below).
 - A real AI-targeting heuristic (Step 3) - see the placeholder above.
 - Most polish specific to two characters sharing one planet - an AI's
   aim search treating a teammate as an obstacle, general crowding feel.
@@ -4146,6 +4147,100 @@ characters to place on them - explicitly flagged by Boo as further out
 than the other two. None of this is built - `CHARACTER_START_ANGLE_
 SPREAD_DEGREES` stays a fixed shared constant for now. Added to the
 "Still not decided" list below as its own thread.
+
+## Phase 31: multi-character combat, Step 2 (player's own tap-to-choose turn-order picker)
+
+Boo: "do the next step in phase 30" - picking up the 3-step multi-
+character combat plan from Phase 30. Two design questions asked directly
+(not left to implementation judgment) before building:
+- **How to pick:** tap the character's sprite directly on the shared
+  planet (not dedicated HUD buttons/portraits).
+- **How often:** every round, as long as both of the player's characters
+  are still alive - not a sticky default you only override sometimes.
+
+**What's built.** All in `PlayScreen.kt`:
+- **`awaitingPlayerOrderPick`** (new field) - true only in the window
+  between the AI's round ending and the player picking who goes first.
+  Set in `beginPlayerOrderPick` (new - called from `handOffToPlayer` when
+  both characters are still alive; with only one survivor, `handOffToPlayer`
+  still activates it directly, same as before this step - nothing to
+  choose between). Always cleared by `activatePlayerCharacter`, regardless
+  of whether it was reached via a tap or the no-choice-needed path.
+- **`PlayerOrderPickerInputProcessor`** (new inner class) - the only
+  listener wired into a new `orderPickerInputProcessor` `InputMultiplexer`
+  (built once in `show()`, same pattern as `fullInputProcessor`/
+  `restrictedInputProcessor`) while the picker is active. A touch within
+  `ORDER_PICKER_TAP_RADIUS` of either still-living player character's own
+  position activates it via the same `activatePlayerCharacter` every other
+  path already uses; anything else is ignored. `ORDER_PICKER_TAP_RADIUS`
+  (0.45) is generous for a fingertip but deliberately kept under half the
+  chord distance between the two characters at
+  `CHARACTER_START_ANGLE_SPREAD_DEGREES`'s current 30 degrees, so their tap
+  zones can't overlap.
+- **Camera reframes to the shared planet itself** (not either character
+  specifically - neither's picked yet) at the same `AVATAR_SNAP_ZOOM` every
+  other turn-transition uses, which already shows the whole planet clearly
+  - both characters end up visible and tappable without any new camera
+  logic.
+- **HUD** shows "Round N - Tap a character to act first" in place of the
+  usual "Round N - P1: 5 left" line while the picker is up (`activePlayerIndex`
+  is stale during this window - still whoever last acted - so the normal
+  label would be actively misleading, not just uninformative). The move
+  buttons are also hidden during the picker, same reasoning.
+- **Whole-squad-then-whole-squad sequencing, generalized for an arbitrary
+  starting pick.** This was the one real correctness wrinkle: the existing
+  `advanceAfterPlayerFired` found "who goes next" via
+  `firstLivingPlayerIndexFrom(finishedIndex + 1)`, which only worked
+  because index 0 always went first and index 1 always went second. With
+  the player now able to tap index 1 to go *first*, "the next index up"
+  stops meaning "the teammate who hasn't gone yet" - there's nothing after
+  index 1 to find that way, which would have skipped index 0's turn
+  entirely for that round. Fixed with a new `PlayerCharacterState
+  .actedThisRound` flag: reset false for every character at the start of
+  each player round (`handOffToPlayer`), set true the instant a character
+  fires (`advanceAfterPlayerFired`), and consulted instead of index order
+  to find who goes next. Generalizes correctly to any pick order; the AI
+  side is untouched - it has no order picker, so its original fixed-index-
+  order assumption still holds there.
+
+**Not built / deliberate scope calls:**
+- **Round 1 has no picker.** The very first round of a match still starts
+  on character 0 directly (set in `init{}`, before `show()`'s
+  `orderPickerInputProcessor` even exists) rather than prompting a pick
+  before anything has happened yet. Every round from the AI's first
+  hand-off onward does prompt. Flagged as a judgment call, not confirmed
+  with Boo - easy to change if round 1 should prompt too.
+- **The AI side has no equivalent picker** - it still always starts from
+  index 0 each round (its own placeholder targeting, unrelated to turn
+  order, is still Step 3's job).
+- Squad-size flexibility beyond fixed-2, and the AI's real targeting
+  heuristic, are both still Step 3 - untouched by this step.
+
+#### How to test this phase on-device
+
+1. Build and run - this touches turn-handoff logic (`handOffToPlayer`,
+   `advanceAfterPlayerFired`) more than rendering, so watch for anything
+   that looks like a stuck turn or a skipped character first.
+2. Let the AI's round finish (both its characters, if both are alive).
+   Confirm the HUD switches to "Tap a character to act first" and the
+   move buttons disappear, instead of one of your characters just
+   auto-activating.
+3. Tap your *second* character (not the one who went first last time).
+   Confirm it becomes active (camera snaps to it, its own movement budget
+   is fresh) and that after it fires, control passes to your *first*
+   character next - not straight to the AI. This is the specific case the
+   `actedThisRound` fix targets; if this regresses, the old index-order bug
+   is back.
+4. Tap your *first* character instead on a different round and confirm
+   the mirror case still works too (first, then second, then AI).
+5. Defeat one of your characters, leaving the other alive. Confirm the
+   next round skips the picker entirely and auto-activates the survivor -
+   no tap prompt with only one option.
+6. Try tapping empty space, a planet, or the AI's side during the picker
+   window - confirm nothing happens (no crash, no character activates)
+   and the prompt just stays up until a valid tap lands.
+7. Confirm pinch/pan and the Back button (pause) still work while the
+   picker is up.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
