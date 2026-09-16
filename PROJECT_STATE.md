@@ -2885,7 +2885,7 @@ near the character doesn't accidentally cancel.
    aim line once the cancel is armed)? Not built - flagging as an easy
    follow-up if it feels too hidden.
 
-## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session; turn order/fixed-squad (Phase 30) and the player's turn-order picker (Phase 31) now built, see below)
+## Multi-character combat: turn order, camera, and stray-shot lifecycle - captured design (Sept 2026 session; all three steps now built - fixed-squad turn order (Phase 30), the player's turn-order picker (Phase 31), and real AI targeting + obstacle polish (Phase 32) - see below)
 
 Picked back up from the "escalation ladder" backlog item - the ladder's
 own design (see "Campaign progression ladder" above and Phase 23 below)
@@ -3034,15 +3034,15 @@ knobs now ("yes").
 **Still not decided - open threads for whenever they're picked back
 up:**
 - **Squad composition / AI behavior with multiple characters** - fixed
-  2-per-side squads and a placeholder AI-targeting rule are now built
-  (Phase 30, Step 1) - a real targeting heuristic and any squad-size
-  flexibility beyond fixed-2 are still open (Step 3 and beyond).
+  2-per-side squads (Phase 30, Step 1), the player's turn-order picker
+  (Phase 31, Step 2), and a real AI-targeting heuristic plus obstacle-
+  avoidance polish (Phase 32, Step 3) are now all built - all three
+  originally-planned steps are done. Squad-size flexibility beyond
+  fixed-2 is the one piece still open, unscheduled.
 - **Build order** for everything in this section - camera/pan-zoom
-  landed first as planned (Phase 24), and multi-character combat's Step 1
-  (fixed squads + turn order, Phase 30) and Step 2 (the player's own
-  turn-order picker, Phase 31) have now landed too; the play-field-size
-  cap and scattered/region-quota placement are still unbuilt and
-  unscheduled.
+  landed first as planned (Phase 24), and multi-character combat's three
+  steps (Phase 30, 31, 32) have all now landed; the play-field-size cap
+  and scattered/region-quota placement are still unbuilt and unscheduled.
 - **Character placement, long-term** (Phase 30 on-device follow-up) -
   Boo wants random placement for characters sharing one planet, even
   distribution across planets once a side has enough of them, and
@@ -3054,8 +3054,10 @@ up:**
   first glance: "dont change anything there for now. once we get game
   mechanics more polished well come back to the HUD and other graphic
   elements." A general build-order call, not specific to the order-picker
-  prompt alone - mechanics (Step 3 and beyond) come before HUD/graphics
-  passes across the board until Boo says otherwise.
+  prompt alone - mechanics come before HUD/graphics passes across the
+  board until Boo says otherwise. Multi-character combat's three steps
+  are now all done (Phase 32); this still applies to whatever mechanics
+  work comes next.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
@@ -3971,11 +3973,11 @@ steps, confirmed with Boo before starting: **Step 1** (this phase) -
 replace the singular player/AI characters with fixed 2-per-side squads,
 sharing each side's existing one planet, whole-squad-then-whole-squad
 turn order in a fixed index sequence (no player-facing order picker
-yet). **Step 2** (now built, see Phase 31 below) - a tap-to-choose UI for
-the player's own turn order within their squad. **Step 3** (not started) - a real AI
-targeting heuristic (lowest-current-HP proposed) plus an on-device
-polish pass for issues specific to sharing a planet (crowding, aim
-obstruction between teammates).
+yet). **Step 2** (built, see Phase 31 below) - a tap-to-choose UI for
+the player's own turn order within their squad. **Step 3** (built, see
+Phase 32 below) - a real AI targeting heuristic (lowest-current-HP) plus
+an obstacle-avoidance pass for AI shots sharing a planet with a
+teammate/enemy.
 
 **What's built.** `AvatarMovementController`/`AiTurnController` needed
 *zero* changes - both already took `planetCenter`/`startAngleDegrees` as
@@ -4036,7 +4038,8 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
 - **AI targeting placeholder (Step 1 only).** `activateAiCharacter`
   always aims at the first living player character, by index - a
   deliberate placeholder per Boo's "pick something reasonable," not the
-  real heuristic (lowest-HP, proposed for Step 3).
+  real heuristic. Replaced by the real lowest-HP heuristic in Phase 32
+  (Step 3).
 - **Orbital drift generalizes per-character, not per-side.** Boo,
   explicit: "characters can share a planet" - so when a shared planet is
   destroyed, *every* living character standing on it starts drifting in
@@ -4069,21 +4072,23 @@ two of each. All of Step 1's work is in `PlayScreen.kt`:
   rows and a `Round N - P{1|2}: M left` / `AI's turn...` / `Shot in
   flight...` turn label.
 
-**Not built this step (deliberately deferred):**
+**Not built this step (deliberately deferred, all now built later):**
 - A player-facing turn-order-picker UI - order was a fixed index sequence
-  (character 0, then 1) in this step. Built in Phase 31 (Step 2, below).
-- A real AI-targeting heuristic (Step 3) - see the placeholder above.
-- Most polish specific to two characters sharing one planet - an AI's
-  aim search treating a teammate as an obstacle, general crowding feel.
-  Flagged for Step 3, not fixed blind. (The one crowding issue that did
-  turn up on first on-device look - the AI pair's starting spread being
-  too tight - got a stopgap fix already; see "On-device follow-up"
-  below.)
-- Characters are not added to `currentCelestialObstacles()` - an AI's
-  shot can currently fly straight through a teammate/enemy character
-  without being blocked by it (same as it always could pass through
-  another character before this phase, just now more likely to matter
-  with two bodies per planet).
+  (character 0, then 1) in this step. Built in Phase 31 (Step 2).
+- A real AI-targeting heuristic - see the placeholder above. Built in
+  Phase 32 (Step 3).
+- Polish specific to two characters sharing one planet - an AI's aim
+  search treating a teammate as an obstacle. Built in Phase 32 (Step 3);
+  see that phase's "Not built" notes for what's still only a soft,
+  scored preference rather than a hard guarantee. (The one crowding issue
+  that did turn up on first on-device look - the AI pair's starting
+  spread being too tight - got a stopgap fix already; see "On-device
+  follow-up" below.)
+- Characters were not added to `currentCelestialObstacles()` (that
+  function stays star/planets-only) - instead Phase 32 added a separate
+  `characterObstaclesExcluding()` used only by each AI character's own
+  `obstacleSource`, so an AI's aim search now avoids routing through a
+  teammate/enemy character too.
 
 #### How to test this phase on-device
 
@@ -4218,10 +4223,11 @@ character combat plan from Phase 30. Two design questions asked directly
   hand-off onward does prompt. Flagged as a judgment call, not confirmed
   with Boo - easy to change if round 1 should prompt too.
 - **The AI side has no equivalent picker** - it still always starts from
-  index 0 each round (its own placeholder targeting, unrelated to turn
-  order, is still Step 3's job).
-- Squad-size flexibility beyond fixed-2, and the AI's real targeting
-  heuristic, are both still Step 3 - untouched by this step.
+  index 0 each round (its own targeting, unrelated to turn order, was
+  still the placeholder at the time this phase was written - see Phase
+  32 for the real heuristic).
+- Squad-size flexibility beyond fixed-2 remains open; the AI's real
+  targeting heuristic (also flagged here as Step 3) was built in Phase 32.
 
 #### How to test this phase on-device
 
@@ -4248,6 +4254,90 @@ character combat plan from Phase 30. Two design questions asked directly
    and the prompt just stays up until a valid tap lands.
 7. Confirm pinch/pan and the Back button (pause) still work while the
    picker is up.
+
+## Phase 32: multi-character combat, Step 3 (real AI targeting + planet-sharing obstacle polish)
+
+Boo: "no. proceed with step 3" - the third and final step of the plan
+from Phase 30, closing out multi-character combat's core mechanics.
+Both pieces were already flagged as Step 3's job in Phase 30/31's own
+"not built yet" notes, and both had already-proposed approaches
+(lowest-HP targeting; AI obstacle-avoidance around teammates) that Boo
+had effectively pre-approved by leaving them as the documented plan
+rather than open questions - so no new `AskUserQuestion` was raised
+before building this step, unlike Steps 1 and 2.
+
+**What's built.** Both in `PlayScreen.kt`:
+- **Real AI targeting.** New `lowestHpLivingPlayerIndex()` replaces the
+  Step 1 placeholder ("always the first living index") in
+  `activateAiCharacter` - the AI now aims each of its characters at
+  whichever living player character currently has the lowest HP, ties
+  going to the lower index. Matches the heuristic already named as the
+  Step 3 plan in Phase 30's writeup.
+- **AI obstacle-avoidance around characters.** New
+  `characterObstaclesExcluding(selfEntity)` builds an
+  `AiTurnController.Obstacle` for every other living character on either
+  side (`AVATAR_RADIUS`-sized for player characters, `TARGET_RADIUS`-sized
+  for AI characters), excluding whichever character is doing the aiming.
+  Each `AiTurnController`'s `obstacleSource` now returns
+  `currentCelestialObstacles() + characterObstaclesExcluding(...)` instead
+  of just the star/planets - so an AI character's aim search now avoids
+  routing a shot through a planet-mate or the enemy character it isn't
+  currently targeting, the same way it already avoided planets. This is
+  AI-planning-only: the player's own aim preview
+  (`renderAimTrajectoryPreview`) is untouched, and real shots still
+  resolve through Box2D/`ProjectileContactListener` regardless of what the
+  AI's own simulation predicted.
+- **Tunneling-gap padding.** Worked through a real correctness question
+  before building the obstacle list: `AiTurnController`'s aim search only
+  samples position every `AI_TRAJECTORY_SIM_STEP_SECONDS` (1/60s), which
+  at `MAX_MISSILE_SPEED` (15 units/sec) is up to ~0.25 units between
+  samples - bigger than a character's own radius (0.2-0.3). A shot that
+  grazes a character between two samples would never register as
+  "collided with an obstacle" in the simulation, even at full overlap.
+  New `AI_CHARACTER_OBSTACLE_PADDING` constant (half that worst-case step
+  distance, ~0.125, derived from the existing constants rather than a
+  hardcoded number) is added to each character-obstacle's radius to close
+  that gap. Only applied to character obstacles - the star/planets are
+  already far bigger than one step's worth of travel, so this was never a
+  real risk for them.
+
+**Not built / deliberate scope calls:**
+- This is a planning-only change - it doesn't touch actual collision
+  resolution, friendly fire, or anything Box2D-side. An AI shot can still
+  physically hit a teammate if the aim search's own scoring ends up
+  preferring that trajectory anyway (avoiding an obstacle only *penalizes*
+  a path that clips one during the simulated search - it doesn't forbid
+  it outright the way solid ground does for a planet).
+- No tie-break beyond index order for equal-HP targets, and no
+  target-switching mid-fight if HP changes after a character's turn has
+  already started (`startTurn` is called once per activation, same as
+  before).
+- Squad-size flexibility beyond fixed-2, random per-planet placement, and
+  the rest of the long-term celestial-body/placement backlog (see "Still
+  not decided") remain untouched - this step was scoped to exactly the
+  two Step 3 items Phase 30 named.
+
+#### How to test this phase on-device
+
+1. Build and run a 2v2 match. Bring one of your characters to noticeably
+   lower HP than the other (let the AI hit one character several times
+   while leaving the other untouched, or use the debug tools if that's
+   faster) and confirm the AI's *next* shot targets your lower-HP
+   character, not whichever one happens to be first.
+2. Heal/switch which of your characters has lower HP (by having the
+   healthier one take damage instead) and confirm the AI's targeting
+   follows - it should keep re-picking whichever is lowest each time it
+   aims, not stick to one character all match.
+3. With both of your characters roughly in line with one of the AI's
+   shots at an enemy character sharing your planet, watch a few AI turns
+   and see whether its trajectory noticeably curves or angles around your
+   other character rather than aiming straight through it - this is
+   inherently a soft, scored preference (see "Not built" above), so don't
+   expect a hard guarantee, just a visible bias away from a straight
+   line through a teammate when a similarly-good angled shot exists.
+4. General regression check: nothing about turn order, the Step 2 order
+   picker, or HUD should have changed this step - confirm those all still
+   behave exactly as Phase 31 described.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

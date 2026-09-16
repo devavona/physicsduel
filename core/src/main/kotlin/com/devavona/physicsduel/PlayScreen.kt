@@ -502,6 +502,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val PULL_POWER_SCALE = 4f
         private const val MAX_MISSILE_SPEED = 15f
 
+        // Sept 2026 session - Step 3 (multi-character combat), planet-
+        // sharing polish. AiTurnController's aim search only samples
+        // position every AI_TRAJECTORY_SIM_STEP_SECONDS - at MAX_MISSILE_
+        // SPEED that's up to ~0.25 units between samples (15 * 1/60),
+        // which is bigger than a character's own radius (AVATAR_RADIUS
+        // 0.2, TARGET_RADIUS 0.3). A shot that grazes a character between
+        // two samples would never register as "hit an obstacle" in the
+        // simulation, even though it should have counted. Padding each
+        // character-obstacle's radius by half that worst-case step
+        // distance closes the gap - see characterObstaclesExcluding. Only
+        // affects the AI's own planning; real shots still resolve through
+        // Box2D/ProjectileContactListener regardless.
+        private const val AI_CHARACTER_OBSTACLE_PADDING = MAX_MISSILE_SPEED * AI_TRAJECTORY_SIM_STEP_SECONDS / 2f
+
         // Phase 19c - UI visual pass. Star count deliberately modest -
         // "doesn't overwhelm what we have so far" (Boo, explicit). Bumped
         // for the Sept 2026 camera session (see STARFIELD_EXTENT_MULTIPLIER
@@ -1024,7 +1038,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 startAngleDegrees = startAngle,
                 aimSpeed = MAX_MISSILE_SPEED,
                 thinkDelaySeconds = AI_THINK_DELAY_SECONDS,
-                obstacleSource = { currentCelestialObstacles() },
+                // Step 3 - multi-character combat: was just
+                // currentCelestialObstacles() (star/planets only) - now
+                // also routes around every other living character (see
+                // characterObstaclesExcluding), so this character's aim
+                // search won't happily fire straight through a planet-mate
+                // or the enemy character it isn't currently targeting.
+                // `aiCharacters[i]` is the same deferred-safe closure
+                // capture already used by onFire/onTurnComplete just below
+                // - fine here for the same reason (only ever invoked
+                // later, well after aiCharacters itself is assigned).
+                obstacleSource = { currentCelestialObstacles() + characterObstaclesExcluding(aiCharacters[i].entity) },
                 aimSearch = AiTurnController.AimSearchConfig(
                     angleSearchDegrees = AI_AIM_ANGLE_SEARCH_DEGREES,
                     angleStepDegrees = AI_AIM_ANGLE_STEP_DEGREES,
@@ -1235,6 +1259,30 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
+     * Sept 2026 session - Step 3 (multi-character combat) AI targeting.
+     * The living player character with the lowest current HP, or null if
+     * none remain (mirrors [firstLivingPlayerIndexFrom]'s own null-when-
+     * none-living case). Replaces the "always the first living index"
+     * placeholder used since Step 1 (Boo, at the time: "not important yet
+     * - pick something reasonable," with lowest-HP already floated in
+     * PROJECT_STATE.md as the eventual real heuristic). Ties fall to
+     * whichever qualifying index is found first, i.e. lower index wins.
+     */
+    private fun lowestHpLivingPlayerIndex(): Int? {
+        var best: Int? = null
+        var bestHp = Int.MAX_VALUE
+        for (i in playerCharacters.indices) {
+            val health = healthMapper.get(playerCharacters[i].entity)
+            if (health.isDefeated) continue
+            if (health.currentHp < bestHp) {
+                bestHp = health.currentHp
+                best = i
+            }
+        }
+        return best
+    }
+
+    /**
      * Sept 2026 session - multi-character combat (Step 1). fullInputProcessor
      * used to permanently list the single avatarMovementController instance
      * - with CHARACTERS_PER_SIDE per side now, only whichever one is
@@ -1329,12 +1377,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         activeAiIndex = index
         val ac = aiCharacters[index]
         if (ac.drifting) ac.driftFrozenVelocity = freezeDrift(ac.body)
-        // Sept 2026 session - AI targeting for Step 1: always the first
-        // living player character (index order, same fixed-order spirit as
-        // the turn sequencing above) - a deliberate placeholder, not the
-        // real "pick a target" heuristic (Boo: "not important yet - pick
-        // something reasonable"), which is Step 3's job.
-        val targetIndex = firstLivingPlayerIndexFrom(0) ?: 0
+        // Sept 2026 session - Step 3 (multi-character combat): real
+        // targeting heuristic, replacing Step 1's "always the first living
+        // index" placeholder - see lowestHpLivingPlayerIndex's doc comment.
+        // Falls back to index 0 if, impossibly, no player character
+        // qualifies (same defensive fallback firstLivingPlayerIndexFrom's
+        // own callers use).
+        val targetIndex = lowestHpLivingPlayerIndex() ?: 0
         ac.controller.startTurn(playerCharacters[targetIndex].controller.position)
         snapCameraToActiveAvatar(ac.controller.position)
     }
@@ -1655,6 +1704,34 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         result.add(celestialObstacles[0]) // the star - never destroyed
         if (!gravitySourceMapper.get(launchPlanetEntity).isDestroyed) result.add(celestialObstacles[1])
         if (!gravitySourceMapper.get(targetPlanetEntity).isDestroyed) result.add(celestialObstacles[2])
+        return result
+    }
+
+    /**
+     * Sept 2026 session - Step 3 (multi-character combat), planet-sharing
+     * polish. Every living character on either side as an
+     * [AiTurnController.Obstacle], padded per [AI_CHARACTER_OBSTACLE_PADDING]
+     * (see that constant's doc comment), excluding [selfEntity] - a
+     * character can't be its own obstacle, since its aim search starts
+     * right on top of itself and would truncate at distance zero on the
+     * very first simulated step. Used only to build each AiTurnController's
+     * obstacleSource (see the aiCharacters construction above) - the
+     * player's own aim preview (renderAimTrajectoryPreview) still uses
+     * currentCelestialObstacles() alone; this is AI-planning-only, not a
+     * player-facing change.
+     */
+    private fun characterObstaclesExcluding(selfEntity: Entity): List<AiTurnController.Obstacle> {
+        val result = ArrayList<AiTurnController.Obstacle>(playerCharacters.size + aiCharacters.size - 1)
+        for (pc in playerCharacters) {
+            if (pc.entity === selfEntity) continue
+            if (healthMapper.get(pc.entity).isDefeated) continue
+            result.add(AiTurnController.Obstacle(Vector2(pc.controller.position), AVATAR_RADIUS + AI_CHARACTER_OBSTACLE_PADDING))
+        }
+        for (ac in aiCharacters) {
+            if (ac.entity === selfEntity) continue
+            if (healthMapper.get(ac.entity).isDefeated) continue
+            result.add(AiTurnController.Obstacle(Vector2(ac.controller.position), TARGET_RADIUS + AI_CHARACTER_OBSTACLE_PADDING))
+        }
         return result
     }
 
