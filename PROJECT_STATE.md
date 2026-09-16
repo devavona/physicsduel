@@ -3049,6 +3049,13 @@ up:**
   eventually scenes with more celestial bodies than characters. Fixed
   symmetric offsets (`CHARACTER_START_ANGLE_SPREAD_DEGREES`) are a
   stopgap only - not scheduled to a specific step yet.
+- **HUD/visual polish, project-wide priority.** Boo, after confirming
+  Phase 31's turn-order prompt actually works but is easy to miss on
+  first glance: "dont change anything there for now. once we get game
+  mechanics more polished well come back to the HUD and other graphic
+  elements." A general build-order call, not specific to the order-picker
+  prompt alone - mechanics (Step 3 and beyond) come before HUD/graphics
+  passes across the board until Boo says otherwise.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
