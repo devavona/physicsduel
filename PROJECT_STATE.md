@@ -3120,9 +3120,13 @@ Steps 1-3 used:**
   celestial-body construction/rendering/drift/HUD all still assume
   exactly one planet per side, left for Step D since only the ladder
   actually needs more than one to exist.
-- **Step D+ (next):** the campaign ladder's own escalation content (5/20/30
-  wins) and the field-size-cap formula - deliberately out of scope here,
-  picked up once this machinery exists.
+- **Step D+ - risk-assessed, confirmed design, not yet built - see "Phase
+  33, Step D" below:** the campaign ladder's own escalation content
+  (5/20/30 wins) and the field-size-cap formula - deliberately out of
+  scope here, picked up once this machinery exists. Split into Step D1
+  (tier lookup, dynamic field size, win-count debug control) and Step D2
+  (the real N-planet/character generalization) - see that section for the
+  full risk assessment and why.
 
 ## Phase 33: planet/character scaling, Step A (generalized data model, no behavior change)
 
@@ -3366,6 +3370,134 @@ today's count == 2" above) - testing is regression-only:
    let a shot go stray, etc.) and confirm nothing regressed there either -
    this step didn't touch anything past initial placement, but it's worth
    confirming.
+
+### Phase 33, Step D: campaign ladder + dynamic field size - PAUSED before any code was written (Sept 2026 session)
+
+Boo, right after Step C shipped: confirmed the two remaining open design
+questions, then asked to pause here and pick Step D up in a future
+session, rather than build it right now. **No PlayScreen.kt changes exist
+for Step D yet** - everything below is confirmed design + risk-assessment
+findings only, so a future session doesn't have to re-derive any of it.
+
+**Confirmed this session (both via direct answers, not judgment calls):**
+- **Field-size formula:** scale both `WORLD_WIDTH`/`WORLD_HEIGHT` by
+  `sqrt(currentCelestialObjectCount / 3)`, capped at 1.5x, keeping the
+  same 9:16 ratio throughout. At today's tier (3 objects: star + 1 planet
+  each side) this is exactly 1x - byte-identical to today's fixed 9f/16f.
+  5-win tier (4 objects) -> ~1.155x (~15% bigger). 20/30-win tier (6
+  objects) -> ~1.414x (~41% bigger) - never actually hits the 1.5x cap at
+  today's ladder, that's headroom for a future extension.
+- **`STAR_X`/`STAR_Y` both scale with the field.** `STAR_X = WORLD_WIDTH /
+  2f` already did (existing formula). `STAR_Y` is today an independent
+  fixed `9f` (NOT derived from `WORLD_HEIGHT`, confirmed by direct read -
+  it's not `WORLD_HEIGHT / 2`, just its own hand-picked value at the base
+  16f field height). Boo, asked directly: scale it proportionally rather
+  than leave it literally fixed, so the star keeps the same *relative*
+  position (`WORLD_HEIGHT * 9f/16f`) as the field grows, instead of
+  visually drifting toward center at higher tiers.
+- **Multi-planet size variation: plain radius variation, existing art
+  only.** Boo's exact words: "Size variation, eventually I will want to
+  reskin these elements but dont want to focus on that now. use the same
+  image but do vary the sizes of the planets" - reuse
+  `planetLaunchTexture`/`planetTargetTexture` exactly as-is, just draw
+  each planet on a side at a different `PLANET_RADIUS`-equivalent size.
+  No tinting, no rotation, no new art - texture/art reskinning is
+  explicitly a separate, later, deferred idea.
+- **Add a permanent win-count debug control**, same standing precedent as
+  `GravityDebugController`/`ShotSpeedDebugController` (small on-screen
+  buttons, left in permanently - no release build to worry about a debug
+  tool leaking into). A `+1` (and a `reset to 0`) button for
+  `SaveManager`'s win count, so every ladder tier can be tested on-demand
+  instead of needing to actually grind 5/20/30 real wins each time this
+  gets touched again.
+
+**Risk-assessment findings from this session (why Step D isn't a quick
+follow-on to A/B/C, and can't be zero-visible-change the way those were):**
+- **`SaveManager.currentWinCount()` confirmed ready to use as-is** -
+  already exists, already the exact API needed (`GameSave.winCount`, v3
+  schema, incremented only by `SaveManager.recordWin()`, called only from
+  `PlayScreen`'s win branch - see Phase 23 above). Nothing needed there.
+- **`WORLD_WIDTH`/`WORLD_HEIGHT` have to stop being `companion object
+  const val`s and become instance-level `val`s**, since they now need to
+  depend on a runtime-read win count (through the campaign-tier lookup).
+  Confirmed only one other companion constant is derived from them
+  (`STAR_X`) - `STAR_Y` turned out NOT to be (see above), so the ripple is
+  smaller than it could have been. But Kotlin instance properties
+  initialize in strict textual declaration order (interleaved with
+  `init{}` blocks in that same order), with no compiler available on this
+  side to catch a mistake - so the campaign-tier lookup and the new
+  `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`/`STAR_Y` values all need to be
+  declared very early in the class body, before `starfieldStars` (an
+  existing instance `val` that already reads `WORLD_WIDTH`/`WORLD_HEIGHT`
+  today) and before the main `init{}` block's viewport/camera setup
+  (`ExtendViewport(WORLD_WIDTH, WORLD_HEIGHT, camera)` /
+  `camera.position.set(...)`), both of which currently sit well before any
+  of Step D's new code would naturally go.
+- **Good news: HUD and character rendering are already mostly
+  generalized**, a free side-effect of the multi-character combat work
+  (Steps 1-3) - `renderStatsPanel`'s `playerRows`/`aiRows` already loop
+  over `playerCharacters`/`aiCharacters` (`mapIndexed`, sized to whatever
+  the list holds), and `renderCharacterSprites` already loops over both
+  lists too. Only the *planet* side of both still assumes exactly one
+  planet per side: `renderCelestialSprites` draws `launchPlanetEntity`/
+  `targetPlanetEntity` directly (not a loop), and the stats panel's
+  `launchRow`/`targetRow` (planet mass) are still single hardcoded rows,
+  not one per planet. Both are straightforward to generalize into loops
+  over `playerPlanets`/`aiPlanets` (the `Planet` class already carries
+  `entity`/`position`/`radius` - Step A/C plumbing pays off here).
+- **Real complication found: `SlingshotInputProcessor` assumes the player
+  has exactly one planet, fixed at construction.** Its constructor takes
+  `planetCenter: Vector2` and `planetRadius: Float` once, used for the
+  horizon/aim-blocking math (`isBelowHorizon`/`clampAboveHorizon`) -
+  today that's always `launchPlanetPosition`/`PLANET_RADIUS` because
+  there's only ever one player planet. `launchPoint` (the aim origin)
+  already IS updated live on every turn hand-off (`launchPoint.set(...)`
+  in `advanceAfterPlayerFired`, an aliased `Vector2` `SlingshotInputProcessor`
+  shares by reference) - but `planetCenter`/`planetRadius` are not: they
+  never change after `init{}`. Once the player can have a 2nd planet (20-
+  win tier) with a different character possibly standing on a different,
+  differently-sized planet (size variation), the currently-active
+  character's real planet center/radius has to be read live, the same way
+  `launchPoint` already is - likely `planetCenter` becomes another
+  mutated-in-place `Vector2` and `planetRadius` becomes a lambda
+  (`() -> Float`) instead of a fixed `Float`. A real interface change to
+  that class, not just `PlayScreen`-internal plumbing.
+- **New collision category needed for the AI's 3rd character** (20-win
+  tier) - today only `CATEGORY_AI_TARGET`/`_2` and `CATEGORY_PLAYER_AVATAR`/
+  `_2` exist (two per side). The player side never exceeds 2 planets/
+  characters in this ladder, so only the AI needs a 3rd
+  (`CATEGORY_AI_TARGET_3` or an array-based lookup replacing the current
+  `if (i == 0) X else X_2` pattern, which doesn't extend past 2 as
+  written).
+
+**Planned build order for whichever future session picks this up** (split
+into two deliveries rather than one large one, given the risk above):
+- **Step D1 (next up):** the campaign-tier lookup function (win count ->
+  per-side planet/character counts, per the ladder in "Campaign
+  progression ladder" above), the `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`/
+  `STAR_Y` conversion to correctly-ordered instance values (computed from
+  the tier's total object count, confirmed formula above), and the new
+  permanent win-count debug control. Note for testing this step in
+  isolation: the field will visibly resize as the debug `+1` button is
+  tapped past 5/20 wins even though D1 alone doesn't create any new
+  planets yet - that's expected, not a bug, and should be called out
+  explicitly in that step's own on-device test script so it doesn't read
+  as something broke.
+- **Step D2:** the actual N-planet/character generalization - entity
+  creation (replacing the two hardcoded `launchPlanetEntity`/
+  `targetPlanetEntity` fields with real lists sized per the tier),
+  `renderCelestialSprites`/damage-overlay/HUD mass-row generalization
+  (loop over `playerPlanets`/`aiPlanets`, per-planet radius for size
+  variation), the new AI 3rd collision category, and the
+  `SlingshotInputProcessor` planetCenter/planetRadius fix above (needed
+  together with the entity generalization - D2 wiring in a real 2nd player
+  planet without this fix would leave aiming subtly wrong at the 20-win
+  tier, so these ship as one delivery, not split further).
+
+**Status: not started, paused here on purpose** - Boo asked to save
+progress and resume in a future session rather than build Step D1 right
+now. This section is written up in full so that resumption doesn't need
+to re-derive any of the above.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
