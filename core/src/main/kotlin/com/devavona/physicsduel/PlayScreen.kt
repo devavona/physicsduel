@@ -30,6 +30,7 @@ import com.badlogic.gdx.utils.viewport.ExtendViewport
 import com.badlogic.gdx.utils.viewport.Viewport
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -398,8 +399,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // keep a planet's center away from the screen edges (and the fixed
         // corner UI); MIN_PLANET_STAR_SEPARATION keeps a planet clear of the
         // star; MIN_PLANET_SEPARATION (checked pairwise, with a re-roll if
-        // violated - see [randomizePlanetPositions]) keeps real empty space
-        // between the two planets, not just non-overlap (2 * PLANET_RADIUS =
+        // violated - see [generateScatteredPositions]) keeps real empty
+        // space between planets, not just non-overlap (2 * PLANET_RADIUS =
         // 1.6, so 4f leaves at least 2.4 units of clear space even in the
         // closest allowed roll).
         private const val PLANET_PLACEMENT_MARGIN_X = 1.3f
@@ -407,6 +408,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val MIN_PLANET_STAR_SEPARATION = 2.5f
         private const val MIN_PLANET_SEPARATION = 4f
         private const val PLANET_PLACEMENT_MAX_ATTEMPTS = 200
+
+        // Sept 2026 session - "Planet/character scaling" design, Step C -
+        // the already-decided "region quota" rule (see PROJECT_STATE.md's
+        // "Planet/character placement" design note): the field divides
+        // into a grid sized relative to how many objects are being placed
+        // (see generateScatteredPositions/regionsPerAxis), and no region
+        // may hold more than this many. 2 was picked to explicitly allow
+        // Boo's "some natural clustering is ok if it feels organic" while
+        // still capping it - not tuned via on-device feel yet, same
+        // "reasonable starting guess" status as every other placement
+        // constant here.
+        private const val REGION_QUOTA_MAX_OBJECTS_PER_REGION = 2
 
         // On-device bug, first random layout to actually hit it: the two
         // checks above only look at each planet's OWN distance from the
@@ -936,7 +949,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * [count] angles (degrees, 0 up to but not including 360) at least
      * [MIN_SHARED_PLANET_ANGLE_SEPARATION_DEGREES] apart pairwise (circular
      * distance - see [angularDistanceDegrees]), via reject-and-retry per
-     * angle - same discipline [randomPlanetPosition] already uses for
+     * angle - same discipline [generateScatteredPositions] uses for
      * planet-to-planet spacing. `count <= 1` skips the separation check
      * entirely, since a single angle has nothing to be too close to. Falls
      * back to exact even spacing (360/count apart, from a random starting
@@ -1550,27 +1563,30 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Phase 20: picks fresh [launchPlanetPosition]/[targetPlanetPosition]
-     * for this game. Boo, explicit: planets can land anywhere for variety
-     * - not pinned to opposite sides of the star - so each is drawn
-     * independently from anywhere in the margin-inset play area (see
-     * [randomPlanetPosition], which already keeps a single planet clear of
-     * the star). The only extra rule enforced here is pairwise: if the
-     * second draw happens to land too close to the first
-     * ([MIN_PLANET_SEPARATION]), it's simply re-rolled (itself still
-     * subject to the same star-clearance rule) until it isn't, up to
-     * [PLANET_PLACEMENT_MAX_ATTEMPTS] tries - given how much of the play
-     * area satisfies both rules at once, this is expected to succeed on
-     * the first or second attempt almost always.
+     * Phase 20, generalized in the "Planet/character scaling" design's
+     * Step C: picks fresh [launchPlanetPosition]/[targetPlanetPosition]
+     * for this game via the N-capable [generateScatteredPositions] instead
+     * of two separate single-planet draws - same guarantees as before
+     * (each clear of the star, and clear of each other by
+     * [MIN_PLANET_SEPARATION]), now going through the same machinery a
+     * future step can call with a bigger count once the campaign ladder
+     * needs more planets per side. The star-*flight-path* check
+     * ([planetLayoutIsClear]) is specific to having exactly a launch/
+     * target *pair* - which of N>2 planets would even count as "the"
+     * flight path stops being well-defined - so it stays a separate
+     * post-check here: on failure, the whole pair is redrawn via a fresh
+     * [generateScatteredPositions] call (simpler than trying to keep one
+     * position and patch the other), up to [PLANET_PLACEMENT_MAX_ATTEMPTS]
+     * tries, same budget as before.
      */
     private fun randomizePlanetPositions() {
-        launchPlanetPosition = randomPlanetPosition()
-        targetPlanetPosition = randomPlanetPosition()
         var attempts = 0
-        while (!planetLayoutIsClear() && attempts < PLANET_PLACEMENT_MAX_ATTEMPTS) {
-            targetPlanetPosition = randomPlanetPosition()
+        do {
+            val positions = generateScatteredPositions(2)
+            launchPlanetPosition = positions[0]
+            targetPlanetPosition = positions[1]
             attempts++
-        }
+        } while (!planetLayoutIsClear() && attempts < PLANET_PLACEMENT_MAX_ATTEMPTS)
     }
 
     /**
@@ -1601,26 +1617,105 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * One random point for a single planet: anywhere in the play area
-     * inset by [PLANET_PLACEMENT_MARGIN_X]/[PLANET_PLACEMENT_MARGIN_Y] from
-     * the screen edges, re-rolled until it's at least
-     * [MIN_PLANET_STAR_SEPARATION] from the star - the star's fixed
-     * position means this alone is enough to guarantee no planet ever
-     * spawns overlapping or awkwardly close to it, independent of the
-     * pairwise planet-to-planet check [randomizePlanetPositions] does on
-     * top of this.
+     * Sept 2026 session - "Planet/character scaling" design, Step C.
+     * Produces [count] positions in the play area, each at least
+     * [MIN_PLANET_STAR_SEPARATION] from the star and [MIN_PLANET_SEPARATION]
+     * from every other position already placed (reject-and-retry per
+     * point, same discipline the old single-planet drawer used), plus a
+     * region-quota layer on top ([regionsPerAxis]/[REGION_QUOTA_MAX_OBJECTS_PER_REGION])
+     * that stops objects piling up in one corner of a field once there are
+     * enough of them for that to become visible - see the "Planet/
+     * character placement" design note in PROJECT_STATE.md for the full
+     * reasoning (scattered placement, decoupled from which side "owns"
+     * anything, but not corner-hoarded).
+     *
+     * At today's `count == 2` (the only caller - see [randomizePlanetPositions])
+     * [regionsPerAxis] works out to a single 1x1 region covering the whole
+     * field, so the quota layer never actually rejects anything - this
+     * produces the same *kind* of result the old two-separate-draws code
+     * always did. That's deliberate: this function exists so a future step
+     * can call it with a bigger count once the campaign ladder actually
+     * adds planets, without this placement logic needing to be written
+     * again - not to change today's visible 2-planet layout.
      */
-    private fun randomPlanetPosition(): Vector2 {
+    private fun generateScatteredPositions(count: Int): List<Vector2> {
+        if (count <= 0) return emptyList()
+        val axisRegions = regionsPerAxis(count)
+        val regionWidth = (WORLD_WIDTH - 2f * PLANET_PLACEMENT_MARGIN_X) / axisRegions
+        val regionHeight = (WORLD_HEIGHT - 2f * PLANET_PLACEMENT_MARGIN_Y) / axisRegions
+        val regionCounts = HashMap<Pair<Int, Int>, Int>()
+        val result = ArrayList<Vector2>(count)
+        repeat(count) {
+            var attempts = 0
+            var placed = false
+            while (!placed && attempts < PLANET_PLACEMENT_MAX_ATTEMPTS) {
+                attempts++
+                val candidate = Vector2(
+                    MathUtils.random(PLANET_PLACEMENT_MARGIN_X, WORLD_WIDTH - PLANET_PLACEMENT_MARGIN_X),
+                    MathUtils.random(PLANET_PLACEMENT_MARGIN_Y, WORLD_HEIGHT - PLANET_PLACEMENT_MARGIN_Y)
+                )
+                if (candidate.dst(STAR_X, STAR_Y) < MIN_PLANET_STAR_SEPARATION) continue
+                if (result.any { it.dst(candidate) < MIN_PLANET_SEPARATION }) continue
+                val regionKey = regionKeyFor(candidate, axisRegions, regionWidth, regionHeight)
+                val currentCount = regionCounts[regionKey] ?: 0
+                if (currentCount >= REGION_QUOTA_MAX_OBJECTS_PER_REGION) continue
+                regionCounts[regionKey] = currentCount + 1
+                result.add(candidate)
+                placed = true
+            }
+            if (!placed) {
+                // Pathological fallback, same discipline the old single-
+                // planet drawer used - only reachable if the field is
+                // packed tight enough that clearance keeps failing within
+                // the attempt budget. Ignores the region quota (clearance
+                // still applies) so count is never silently short.
+                result.add(fallbackScatteredPosition(result))
+            }
+        }
+        return result
+    }
+
+    /**
+     * How many regions per axis (a square [axisRegions] x [axisRegions]
+     * grid) [generateScatteredPositions] divides the field into for its
+     * region-quota check - sized so the grid holds roughly [count] /
+     * [REGION_QUOTA_MAX_OBJECTS_PER_REGION] regions total, i.e. on average
+     * right at capacity. At `count == 2` (today's fixed 2-planet game)
+     * this works out to a single 1x1 region - the whole field - so the
+     * quota layer is a no-op until count grows enough for a real multi-
+     * region grid to form.
+     */
+    private fun regionsPerAxis(count: Int): Int =
+        ceil(sqrt(count.toFloat() / REGION_QUOTA_MAX_OBJECTS_PER_REGION)).toInt().coerceAtLeast(1)
+
+    /** Which region-grid cell [point] falls in, clamped to the grid so a point exactly on the field's far edge doesn't index one cell past the end. */
+    private fun regionKeyFor(point: Vector2, axisRegions: Int, regionWidth: Float, regionHeight: Float): Pair<Int, Int> {
+        val regionX = ((point.x - PLANET_PLACEMENT_MARGIN_X) / regionWidth).toInt().coerceIn(0, axisRegions - 1)
+        val regionY = ((point.y - PLANET_PLACEMENT_MARGIN_Y) / regionHeight).toInt().coerceIn(0, axisRegions - 1)
+        return regionX to regionY
+    }
+
+    /**
+     * Last-resort position when [generateScatteredPositions] can't satisfy
+     * clearance within its attempt budget - re-checks against [placed] (the
+     * positions already committed this call) but skips the region quota,
+     * so a caller always gets back the [count] it asked for. Shouldn't be
+     * reachable given how much of the play area satisfies clearance at
+     * once, same expectation the old single-planet drawer's own fallback
+     * had.
+     */
+    private fun fallbackScatteredPosition(placed: List<Vector2>): Vector2 {
         repeat(PLANET_PLACEMENT_MAX_ATTEMPTS) {
             val candidate = Vector2(
                 MathUtils.random(PLANET_PLACEMENT_MARGIN_X, WORLD_WIDTH - PLANET_PLACEMENT_MARGIN_X),
                 MathUtils.random(PLANET_PLACEMENT_MARGIN_Y, WORLD_HEIGHT - PLANET_PLACEMENT_MARGIN_Y)
             )
-            if (candidate.dst(STAR_X, STAR_Y) >= MIN_PLANET_STAR_SEPARATION) return candidate
+            if (candidate.dst(STAR_X, STAR_Y) >= MIN_PLANET_STAR_SEPARATION &&
+                placed.none { it.dst(candidate) < MIN_PLANET_SEPARATION }
+            ) {
+                return candidate
+            }
         }
-        // Pathological fallback - shouldn't be reachable given the margins/
-        // separations above leave most of the play area valid, but returns
-        // something sane rather than crashing if it ever is.
         return Vector2(PLANET_PLACEMENT_MARGIN_X, PLANET_PLACEMENT_MARGIN_Y)
     }
 

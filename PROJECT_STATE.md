@@ -3113,10 +3113,14 @@ Steps 1-3 used:**
   from Step A already handled the one-per-planet-vs-share distribution
   correctly on its own - Step B's real work was the *positioning* of
   characters sharing a planet, not the distribution itself.
-- **Step C (next):** generalize the placement algorithm itself
-  (region-quota, part 3 above) from exactly-2-planets to N, since Step A/B
-  alone don't yet let more than 2 planets actually exist per side.
-- **Step D+:** the campaign ladder's own escalation content (5/20/30
+- **Step C - built, see Phase 33 below:** generalize the placement
+  algorithm itself (region-quota, part 3 above) from exactly-2-planets to
+  N, since Step A/B alone don't yet let more than 2 planets actually exist
+  per side. Deliberately scoped to just the position-generation math -
+  celestial-body construction/rendering/drift/HUD all still assume
+  exactly one planet per side, left for Step D since only the ladder
+  actually needs more than one to exist.
+- **Step D+ (next):** the campaign ladder's own escalation content (5/20/30
   wins) and the field-size-cap formula - deliberately out of scope here,
   picked up once this machinery exists.
 
@@ -3292,6 +3296,76 @@ specific on-device check once Step C lands multiple planets per side.
    drift, and the horizon/no-fire check should all still behave normally -
    this step only touches where characters *start*, nothing about turn
    flow or combat logic.
+
+### Phase 33, Step C: generalized the placement algorithm to N planets (region-quota)
+
+The third of the four steps from the "Planet/character scaling" design
+note above. Scope, confirmed by continuing straight down the documented
+plan: generalize the *placement algorithm itself* (the already-decided
+scattered + region-quota rule) from always-exactly-2-planets to a
+reusable N-capable function - not to actually put more than 2 planets in
+a game yet. That's deliberately still Step D's job (the campaign ladder's
+own escalation content), since nothing needs a bigger field or more
+planets to exist until the ladder is what's asking for them.
+
+**What's built**, all in `PlayScreen.kt`:
+- **`generateScatteredPositions(count)`** (new) - produces `count`
+  positions, each clear of the star (`MIN_PLANET_STAR_SEPARATION`) and of
+  every other position already placed this call (`MIN_PLANET_SEPARATION`),
+  via the same reject-and-retry discipline the old single-planet drawer
+  used. Layers the region-quota rule on top: the field divides into a
+  square grid (`regionsPerAxis`, sized so total regions ≈ `count` /
+  `REGION_QUOTA_MAX_OBJECTS_PER_REGION`, i.e. on average right at
+  capacity), and a candidate is rejected if its region has already hit
+  `REGION_QUOTA_MAX_OBJECTS_PER_REGION` (2, a starting guess, not tuned
+  yet) - the layer that actually stops objects piling into one corner of
+  a large field, per Boo's "if field size is large, I dont want 6 objects
+  clustered in a corner" concern from the original design discussion.
+- **At today's `count == 2`, the region grid works out to a single 1x1
+  region** covering the whole field, so the quota layer is a complete
+  no-op right now - confirmed by the math (`regionsPerAxis(2)` = ceil(√(2/2))
+  = 1), not just asserted. This was the intended outcome, not a bug: the
+  point of Step C is reusable machinery, not a visible change to today's
+  2-planet game. Nothing should look different on-device after this step.
+- **`randomizePlanetPositions()` now calls `generateScatteredPositions(2)`**
+  instead of drawing the launch/target pair as two separate single-planet
+  calls. The star-*flight-path* check (`planetLayoutIsClear` - the star
+  can't sit too close to the direct line between the two planets) stays a
+  separate post-check, since "which of N planets counts as the flight
+  path" only means something for exactly a launch/target pair - on
+  failure the whole pair is redrawn via a fresh `generateScatteredPositions`
+  call, same retry budget as before.
+- **`randomPlanetPosition()` (the old single-planet drawer) is gone**,
+  fully superseded by `generateScatteredPositions`.
+
+**Not built this step:** anything that would actually let more than one
+planet exist per side in a real game - the celestial-body construction in
+`init{}` (`launchPlanetBody`/`launchPlanetEntity`/`targetPlanetBody`/
+`targetPlanetEntity`) is still exactly two hardcoded fields, not a list,
+and rendering/drift/HUD all still assume exactly one planet per side.
+Generalizing *those* wasn't part of Step C's scope - they're needed only
+once Step D's campaign ladder actually asks for a second planet, and are
+sized better as part of building that real, playable escalation content
+than as speculative plumbing here. The field-size-cap formula (also
+deferred, see the design note above) is the other piece Step D still
+needs.
+
+#### How to test this phase on-device
+
+This step is a pure refactor with no intended visible change (see "at
+today's count == 2" above) - testing is regression-only:
+1. Build and run several fresh games in a row. Both planets should still
+   land randomly each game, respecting the same clearances as always -
+   never overlapping the star, never too close to each other, never with
+   the star sitting on the direct line between them (the older star-in-
+   flight-path bug this file already fixed once).
+2. Nothing about how planets look, where they land, or how the game plays
+   should feel any different from before this step - if it does, that's a
+   sign this refactor accidentally changed something it shouldn't have.
+3. Play a handful of games to reasonable completion (destroy a planet,
+   let a shot go stray, etc.) and confirm nothing regressed there either -
+   this step didn't touch anything past initial placement, but it's worth
+   confirming.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
