@@ -4414,6 +4414,43 @@ character combat plan from Phase 30. Two design questions asked directly
   session, instead of routing through stage/commit — still following the
   standing rule: init/commit only, never push — Boo always runs the actual
   push.
+- **`device_bash` down again (different cause, Phase 30/31 session):**
+  every attempt this session failed with "Workspace unavailable... a
+  Windows update released September 8 prevents Claude's workspace from
+  reaching your files" - a platform-side issue, not the no-folder-connected
+  cause above (a folder was connected throughout). Fell back to the
+  `device_list_dir` (get a fresh mtime) → write to `/mnt/user-data/outputs/`
+  → `device_commit_files` (with that mtime as `expectedMtimeMs`) pattern for
+  every file write this whole session. Revisit whether `device_bash` is
+  back before assuming this fallback is still needed.
+- **File-revert bug found this same session, cause unconfirmed but
+  probably related to the point above.** Multiple times, a file Claude
+  wrote via `device_commit_files` (both `PlayScreen.kt` and
+  `PROJECT_STATE.md`) silently reverted back to its previous (already-
+  committed) content on Boo's PC before he got to `git add`/`git commit` -
+  once within the normal time it took him to read Claude's message and
+  paste commands, i.e. not obviously tied to any specific action on his
+  end. Ruled out: OneDrive (not enabled) and Dropbox (has its own separate
+  folder, not this one). Tried Android Studio's Invalidate Caches/Restart -
+  didn't fix it. Leading theory: `device_commit_files` writes bytes
+  successfully but doesn't trigger Windows' normal file-change
+  notifications on this PC (plausibly the same Sept 8 Windows update issue
+  above) - so Android Studio (or any app with its own file cache) never
+  invalidates its stale in-memory copy, and later flushes that stale copy
+  back over Claude's write on its own schedule (a save-all-before-
+  sync/run, or possibly just periodic autosave - not fully isolated).
+  Not confirmed as the root cause, just the best-fitting theory so far.
+  **Practical mitigation, not a fix:** since a `git commit` captures
+  whatever's on disk at the instant it runs, a later revert of the
+  working-tree file doesn't undo an already-completed commit. So: always
+  give Boo one single copy-pasteable block that adds, commits, AND pushes
+  immediately after Claude writes a file - never split "check it first"
+  and "commit it later" into two separate exchanges, since the gap between
+  them (even just the time to read a message) has been enough for a revert
+  to happen. If `git status`/`git log` ever shows a commit didn't actually
+  happen (working tree already clean, nothing staged), that means the
+  revert won the race that time - just re-write the file and retry the
+  same single-block pattern.
 - Boo prefers step-by-step pacing with no assumed familiarity with dev tool
   UIs (Android Studio menus, git terminal) — see Claude's memory for the
   full standing preference and the "SBS" shorthand.
@@ -4433,7 +4470,3 @@ character combat plan from Phase 30. Two design questions asked directly
   tells the whole story on its own) and in the "Physics Dual" Claude Project's
   docs (so a brand-new chat can pick up context without touching Boo's PC at
   all). Keep both updated together at each phase checkpoint.
-- REVERT_TEST_MARKER: harmless throwaway line, added purely to test whether
-  a Gradle sync/Run in Android Studio silently reverts a committed external
-  file edit back to its previous content. Safe to delete once the test is
-  done either way.
