@@ -31,6 +31,7 @@ import com.badlogic.gdx.utils.viewport.Viewport
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.ceil
+import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -132,8 +133,56 @@ import kotlin.random.Random
 class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     companion object {
-        private const val WORLD_WIDTH = 9f
-        private const val WORLD_HEIGHT = 16f
+        // Sept 2026 session - Step D1 (see PROJECT_STATE.md's "Phase 33,
+        // Step D" entry). These used to be the field dimensions themselves
+        // (fixed const vals) - now just this scaling formula's baseline.
+        // The real WORLD_WIDTH/WORLD_HEIGHT/STAR_X/STAR_Y (same names,
+        // deliberately - see why below) had to become instance-level vals
+        // instead, since the field now has to depend on a runtime-read win
+        // count (via the campaign tier just below) rather than being fixed
+        // at compile time - see the instance property block immediately
+        // after this companion object closes. BASE_WORLD_WIDTH x
+        // BASE_WORLD_HEIGHT is still the exact 9:16 field every game used
+        // before this step - at the campaign ladder's starting tier (3
+        // celestial objects: star + 1 planet each side), fieldScale below
+        // resolves to exactly 1x, so nothing actually changes size yet at
+        // today's tier.
+        private const val BASE_WORLD_WIDTH = 9f
+        private const val BASE_WORLD_HEIGHT = 16f
+
+        /**
+         * Sept 2026 session - Step D1. One entry per rung of the Campaign
+         * progression ladder (see "Campaign progression ladder" above).
+         * [playerPlanetCount]/[aiPlanetCount] double as each side's
+         * character count too - the ladder always grows a planet and its
+         * one character together (see that design note's "AI gets a
+         * second planet and a second character" wording). [isCampaignComplete]
+         * is the 30-win "reset progress to zero" flag - it doesn't grow
+         * the counts any further past the 20-win tier, just marks the
+         * ladder as finished.
+         */
+        private data class CampaignTier(
+            val playerPlanetCount: Int,
+            val aiPlanetCount: Int,
+            val isCampaignComplete: Boolean
+        )
+
+        /**
+         * Sept 2026 session - Step D1. Pure function of [winCount] - not
+         * tied to any instance state - so it's safe to call from an
+         * instance property initializer regardless of this class's own
+         * property declaration order (see [campaignTier]'s doc comment).
+         * Thresholds match "Campaign progression ladder" above exactly:
+         * start (0-4 wins) is today's 1 planet/character per side; 5 wins
+         * gives the AI a 2nd; 20 wins gives the AI a 3rd AND the player a
+         * 2nd (catching up); 30 wins just adds the campaign-complete flag
+         * on top of the same 20-win counts.
+         */
+        private fun campaignTierFor(winCount: Int): CampaignTier = when {
+            winCount >= 20 -> CampaignTier(playerPlanetCount = 2, aiPlanetCount = 3, isCampaignComplete = winCount >= 30)
+            winCount >= 5 -> CampaignTier(playerPlanetCount = 1, aiPlanetCount = 2, isCampaignComplete = false)
+            else -> CampaignTier(playerPlanetCount = 1, aiPlanetCount = 1, isCampaignComplete = false)
+        }
 
         // Sept 2026 session - see CameraGestureController's class doc
         // comment for MIN_ZOOM/MAX_ZOOM (the pinch-zoom range this sits
@@ -229,7 +278,21 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // as a knocked-loose drift, not a launch. Dropped from 1f to 0.2f
         // (a fifth of that speed) - still just a starting guess, tune
         // further if it's still too fast/slow on-device.
-        private const val ORBITAL_DRIFT_SPEED_FRACTION = 0.2f
+        //
+        // Sept 2026 session - this fixed fraction turned out to be the
+        // direct cause of a real game-balance problem: 0.2x circular-orbit
+        // speed is far too slow to hold any kind of stable orbit, so a
+        // drifting character's decaying ellipse dives into the star almost
+        // every time - destroying the enemy's planet became a near-
+        // guaranteed kill, always the stronger strategy over aiming at
+        // characters directly (Boo, explicit: "that makes the winning
+        // strategy to always blow up the planet and not aim at
+        // characters"). Replaced by [OrbitalDriftTuning.speedFraction] (a
+        // live-tunable value, same standing-debug-tool pattern as
+        // [ShotSpeedTuning]/[ShotSpeedDebugController]) so the actual
+        // fraction that stops the star-dive - the working theory is 1.0,
+        // true circular-orbit speed - can be dialed in on-device instead of
+        // guessed at blind. See [driftKickVelocity].
 
         // Sept 2026 session - "landing" on a surviving planet/moon while
         // drifting deals a small, fixed knock rather than anything
@@ -389,8 +452,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // Phase 20: the star stays fixed dead center of the world every
         // game (Boo, explicit: "the star stays centered") - only the two
         // planets' positions are randomized now, see [randomizePlanetPositions].
-        private const val STAR_X = WORLD_WIDTH / 2f
-        private const val STAR_Y = 9f
+        // Sept 2026 session - Step D1: STAR_X/STAR_Y moved out of this
+        // companion object to become instance-level vals (same names) -
+        // see the property block right after this companion object closes
+        // for why and the now-proportional STAR_Y formula.
 
         // Phase 20 planet placement constraints. Boo, explicit: planets can
         // land anywhere for variety (not pinned to "player's always left of
@@ -551,6 +616,60 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val STATS_BAR_GAP_BELOW_TEXT = 8f
         private const val STATS_ROW_GAP = 16f
     }
+
+    // Sept 2026 session - Step D1 (see PROJECT_STATE.md's "Phase 33, Step
+    // D" entry for the full risk assessment behind this block). Computed
+    // once per PlayScreen instance - a fresh game only ever starts via a
+    // new PlayScreen (MenuScreen/PauseScreen's "New Game" both create one),
+    // so re-reading SaveManager here naturally picks up whatever win count
+    // exists at that moment. A win recorded, or a debug-button tap on
+    // WinCountDebugController, mid-match only takes effect on the NEXT new
+    // game - not live - since this only runs once, right here, in the
+    // property initialization that happens when a PlayScreen is
+    // constructed.
+    //
+    // Declaration order below is load-bearing, not stylistic: Kotlin
+    // initializes instance properties in strict textual order, interleaved
+    // with init{} blocks in that same order, and starfieldStars (an
+    // existing property further down) plus init{}'s own viewport/camera
+    // setup both already read WORLD_WIDTH/WORLD_HEIGHT/STAR_X - so every
+    // value below has to resolve correctly before either of those runs,
+    // which is exactly why this whole block sits immediately after the
+    // companion object closes, before every other property in this class.
+    private val campaignTier: CampaignTier = campaignTierFor(SaveManager.currentWinCount())
+
+    // Total celestial objects this game: the star (always exactly one,
+    // never scales) plus every planet on both sides at this tier. Drives
+    // fieldScale below - see "Campaign progression ladder"/"Phase 33, Step
+    // D" in PROJECT_STATE.md for the confirmed formula and the 3/4/6-
+    // object progression across the ladder's tiers.
+    private val totalCelestialObjectCount: Int = 1 + campaignTier.playerPlanetCount + campaignTier.aiPlanetCount
+
+    // Confirmed formula (Sept 2026 session): sqrt(count / 3), capped at
+    // 1.5x. Resolves to exactly 1x at today's 3-object starting tier
+    // (byte-identical to the old fixed BASE_WORLD_WIDTH/BASE_WORLD_HEIGHT
+    // values below), ~1.155x at the 5-win/4-object tier, ~1.414x at the
+    // 20-win-and-up/6-object tier - never actually reaches the 1.5x cap
+    // anywhere in today's ladder; that headroom is for a future extension
+    // past 6 objects, not exercised yet.
+    private val fieldScale: Float = min(1.5f, sqrt(totalCelestialObjectCount / 3f))
+
+    // WORLD_WIDTH/WORLD_HEIGHT/STAR_X/STAR_Y were companion object const
+    // vals until this step (see BASE_WORLD_WIDTH/BASE_WORLD_HEIGHT's own
+    // doc comment above) - deliberately kept as these exact same names,
+    // now as instance vals, rather than renamed, so every one of this
+    // file's many other WORLD_WIDTH/WORLD_HEIGHT/STAR_X/STAR_Y references
+    // needed zero changes - a real risk-reduction choice given there's no
+    // compiler on this side of the workflow to catch a missed rename.
+    private val WORLD_WIDTH: Float = BASE_WORLD_WIDTH * fieldScale
+    private val WORLD_HEIGHT: Float = BASE_WORLD_HEIGHT * fieldScale
+    private val STAR_X: Float = WORLD_WIDTH / 2f
+    // Boo, asked directly (Sept 2026 session): scale proportionally rather
+    // than stay literally fixed at the old 9f, so the star keeps the same
+    // RELATIVE position - slightly above center, same ratio as the
+    // original 9f-of-16f field - as the field grows at higher tiers,
+    // instead of visually drifting toward center.
+    private val STAR_Y: Float = WORLD_HEIGHT * (9f / 16f)
 
     private lateinit var camera: OrthographicCamera
     private lateinit var viewport: Viewport
@@ -749,6 +868,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // that adjusts it, same split GravitySystem/GravityDebugController use.
     private lateinit var shotSpeedTuning: ShotSpeedTuning
     private lateinit var shotSpeedDebugController: ShotSpeedDebugController
+    // Sept 2026 session - Step D1. Same standing-debug-tool pattern as
+    // gravityDebugController/shotSpeedDebugController above, stacked in
+    // the same corner - see WinCountDebugController's own doc comment.
+    private lateinit var winCountDebugController: WinCountDebugController
+    // Sept 2026 session - orbital-drift game-balance follow-up (see
+    // OrbitalDriftTuning's own doc comment). Same standing-debug-tool
+    // pattern, stacked as the fourth row in the same corner.
+    private lateinit var orbitalDriftTuning: OrbitalDriftTuning
+    private lateinit var orbitalDriftDebugController: OrbitalDriftDebugController
 
     // Phase 7 HUD: a screen-pixel (not world-unit) camera + batch, separate
     // from [camera]/[viewport] above which stay in Box2D world units for the
@@ -1237,6 +1365,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         )
         gravityDebugController = GravityDebugController(gravitySystem)
         shotSpeedDebugController = ShotSpeedDebugController(shotSpeedTuning)
+        winCountDebugController = WinCountDebugController()
+        orbitalDriftTuning = OrbitalDriftTuning()
+        orbitalDriftDebugController = OrbitalDriftDebugController(orbitalDriftTuning)
 
         // Sept 2026 session - frames the player's own avatar from the very
         // first frame, same as every later turn-transition snap, instead of
@@ -1260,6 +1391,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
+            addProcessor(winCountDebugController)
+            addProcessor(orbitalDriftDebugController)
             addProcessor(activePlayerCharacter().controller)
             addProcessor(slingshotInputProcessor)
         }
@@ -1275,6 +1408,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
+            addProcessor(winCountDebugController)
+            addProcessor(orbitalDriftDebugController)
         }
         // Step 2 - multi-character combat: the player's own turn-order
         // picker's InputMultiplexer, swapped in only during
@@ -1287,6 +1422,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(BackKeyHandler())
             addProcessor(gravityDebugController)
             addProcessor(shotSpeedDebugController)
+            addProcessor(winCountDebugController)
+            addProcessor(orbitalDriftDebugController)
             addProcessor(PlayerOrderPickerInputProcessor())
         }
         Gdx.input.inputProcessor = fullInputProcessor
@@ -1402,6 +1539,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         fullInputProcessor.addProcessor(BackKeyHandler())
         fullInputProcessor.addProcessor(gravityDebugController)
         fullInputProcessor.addProcessor(shotSpeedDebugController)
+        fullInputProcessor.addProcessor(winCountDebugController)
+        fullInputProcessor.addProcessor(orbitalDriftDebugController)
         fullInputProcessor.addProcessor(activePlayerCharacter().controller)
         fullInputProcessor.addProcessor(slingshotInputProcessor)
     }
@@ -1991,7 +2130,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * Sept 2026 session - orbital drift's initial "flung into orbit" kick,
      * shared by [beginPlayerDrift]/[beginAiDrift]. Speed is a fraction of
      * the true circular-orbit speed around the star at [characterPosition]'s
-     * radius - see ORBITAL_DRIFT_SPEED_FRACTION's doc comment.
+     * radius - see [OrbitalDriftTuning]'s doc comment for why that fraction
+     * is now live-tunable rather than a fixed constant.
      *
      * **Direction (revised after first on-device test).** Boo, on the
      * original always-the-same-rotational-sense kick: "the angular velocity
@@ -2046,7 +2186,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val radialFromStar = Vector2(characterPosition).sub(STAR_X, STAR_Y)
         val distanceFromStar = radialFromStar.len().coerceAtLeast(GravitySystem.MIN_DISTANCE)
         val orbitSpeed = sqrt(GravitySystem.G * gravitySystem.gravityMultiplier * STAR_MASS / distanceFromStar)
-        return direction.scl(orbitSpeed * ORBITAL_DRIFT_SPEED_FRACTION)
+        return direction.scl(orbitSpeed * orbitalDriftTuning.speedFraction)
     }
 
     /**
@@ -2474,6 +2614,8 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderHud()
         renderGravityDebugControls()
         renderShotSpeedDebugControls()
+        renderWinCountDebugControls()
+        renderOrbitalDriftDebugControls()
         renderMovementControls()
         renderStatsPanel()
     }
@@ -2864,6 +3006,80 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             hudBatch, multiplierLabel,
             plusRect.x + plusRect.width - HudFont.widthOf(multiplierLabel),
             shotSpeedDebugController.labelBaselineY
+        )
+        hudBatch.end()
+    }
+
+    /**
+     * Sept 2026 session - Step D1. Draws [WinCountDebugController]'s two
+     * tap zones ("+1 Win" / "Reset") and the current win count, directly
+     * below [renderShotSpeedDebugControls]'s row (same right-edge
+     * alignment). Debug-only tuning UI, identical structure to that
+     * method - see [WinCountDebugController]'s own doc comment for why
+     * this exists and why a tap here doesn't change the current game.
+     */
+    private fun renderWinCountDebugControls() {
+        val resetRect = winCountDebugController.resetButtonRect
+        val plusRect = winCountDebugController.plusButtonRect
+
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        buttonPatch.draw(hudBatch, resetRect.x, resetRect.y, resetRect.width, resetRect.height)
+        buttonPatch.draw(hudBatch, plusRect.x, plusRect.y, plusRect.width, plusRect.height)
+        val resetLabel = "R"
+        HudFont.font.draw(
+            hudBatch, resetLabel,
+            resetRect.x + (resetRect.width - HudFont.widthOf(resetLabel)) / 2f,
+            resetRect.y + resetRect.height * 0.65f
+        )
+        val plusLabel = "+1"
+        HudFont.font.draw(
+            hudBatch, plusLabel,
+            plusRect.x + (plusRect.width - HudFont.widthOf(plusLabel)) / 2f,
+            plusRect.y + plusRect.height * 0.65f
+        )
+        val winsLabel = "Wins: %d".format(SaveManager.currentWinCount())
+        HudFont.font.draw(
+            hudBatch, winsLabel,
+            plusRect.x + plusRect.width - HudFont.widthOf(winsLabel),
+            winCountDebugController.labelBaselineY
+        )
+        hudBatch.end()
+    }
+
+    /**
+     * Sept 2026 session - orbital-drift game-balance follow-up. Draws
+     * [OrbitalDriftDebugController]'s two tap zones and the current speed
+     * fraction, directly below [renderWinCountDebugControls]'s row (same
+     * right-edge alignment). Debug-only tuning UI, identical structure to
+     * [renderShotSpeedDebugControls] - see [OrbitalDriftTuning]'s own doc
+     * comment for why this exists.
+     */
+    private fun renderOrbitalDriftDebugControls() {
+        val minusRect = orbitalDriftDebugController.minusButtonRect
+        val plusRect = orbitalDriftDebugController.plusButtonRect
+
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        buttonPatch.draw(hudBatch, minusRect.x, minusRect.y, minusRect.width, minusRect.height)
+        buttonPatch.draw(hudBatch, plusRect.x, plusRect.y, plusRect.width, plusRect.height)
+        val minusLabel = "-"
+        HudFont.font.draw(
+            hudBatch, minusLabel,
+            minusRect.x + (minusRect.width - HudFont.widthOf(minusLabel)) / 2f,
+            minusRect.y + minusRect.height * 0.65f
+        )
+        val plusLabel = "+"
+        HudFont.font.draw(
+            hudBatch, plusLabel,
+            plusRect.x + (plusRect.width - HudFont.widthOf(plusLabel)) / 2f,
+            plusRect.y + plusRect.height * 0.65f
+        )
+        val fractionLabel = "Drift Speed x%.1f".format(orbitalDriftTuning.speedFraction)
+        HudFont.font.draw(
+            hudBatch, fractionLabel,
+            plusRect.x + plusRect.width - HudFont.widthOf(fractionLabel),
+            orbitalDriftDebugController.labelBaselineY
         )
         hudBatch.end()
     }

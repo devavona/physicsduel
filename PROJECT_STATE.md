@@ -3371,13 +3371,13 @@ today's count == 2" above) - testing is regression-only:
    this step didn't touch anything past initial placement, but it's worth
    confirming.
 
-### Phase 33, Step D: campaign ladder + dynamic field size - PAUSED before any code was written (Sept 2026 session)
+### Phase 33, Step D: campaign ladder + dynamic field size
 
 Boo, right after Step C shipped: confirmed the two remaining open design
-questions, then asked to pause here and pick Step D up in a future
-session, rather than build it right now. **No PlayScreen.kt changes exist
-for Step D yet** - everything below is confirmed design + risk-assessment
-findings only, so a future session doesn't have to re-derive any of it.
+questions, then asked to pause before building - picked back up in a
+later session to actually build Step D1 (see its own "✅ DONE" entry
+below, after the design/risk-assessment writeup). Step D2 is still not
+started.
 
 **Confirmed this session (both via direct answers, not judgment calls):**
 - **Field-size formula:** scale both `WORLD_WIDTH`/`WORLD_HEIGHT` by
@@ -3470,21 +3470,11 @@ follow-on to A/B/C, and can't be zero-visible-change the way those were):**
   `if (i == 0) X else X_2` pattern, which doesn't extend past 2 as
   written).
 
-**Planned build order for whichever future session picks this up** (split
-into two deliveries rather than one large one, given the risk above):
-- **Step D1 (next up):** the campaign-tier lookup function (win count ->
-  per-side planet/character counts, per the ladder in "Campaign
-  progression ladder" above), the `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`/
-  `STAR_Y` conversion to correctly-ordered instance values (computed from
-  the tier's total object count, confirmed formula above), and the new
-  permanent win-count debug control. Note for testing this step in
-  isolation: the field will visibly resize as the debug `+1` button is
-  tapped past 5/20 wins even though D1 alone doesn't create any new
-  planets yet - that's expected, not a bug, and should be called out
-  explicitly in that step's own on-device test script so it doesn't read
-  as something broke.
-- **Step D2:** the actual N-planet/character generalization - entity
-  creation (replacing the two hardcoded `launchPlanetEntity`/
+**Planned build order** (split into two deliveries rather than one large
+one, given the risk above):
+- **Step D1 - built, see its own entry immediately below.**
+- **Step D2 (next up):** the actual N-planet/character generalization -
+  entity creation (replacing the two hardcoded `launchPlanetEntity`/
   `targetPlanetEntity` fields with real lists sized per the tier),
   `renderCelestialSprites`/damage-overlay/HUD mass-row generalization
   (loop over `playerPlanets`/`aiPlanets`, per-planet radius for size
@@ -3494,10 +3484,99 @@ into two deliveries rather than one large one, given the risk above):
   planet without this fix would leave aiming subtly wrong at the 20-win
   tier, so these ship as one delivery, not split further).
 
-**Status: not started, paused here on purpose** - Boo asked to save
-progress and resume in a future session rather than build Step D1 right
-now. This section is written up in full so that resumption doesn't need
-to re-derive any of the above.
+#### Phase 33, Step D1: campaign tier lookup + dynamic field size + win-count debug control - ✅ DONE, built (Sept 2026 session)
+
+The first of the two Step D deliveries above. Confirmed scope going in:
+the campaign-tier lookup, the `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`/
+`STAR_Y` conversion to correctly-ordered instance values, and the new
+permanent win-count debug control - deliberately NOT the entity/rendering/
+HUD/collision generalization (that's Step D2's job).
+
+**What's built, all in `PlayScreen.kt` unless noted:**
+- **`CampaignTier` data class + `campaignTierFor(winCount)`** (both in the
+  companion object) - the exact thresholds from "Campaign progression
+  ladder" above: 0-4 wins = 1 planet/character each side (today's real
+  behavior), 5-19 wins = AI gets a 2nd, 20-29 wins = AI gets a 3rd AND
+  player gets a 2nd, 30+ wins = same counts as 20-29 plus
+  `isCampaignComplete = true`. Pure function of an `Int`, not tied to any
+  instance state - safe to call from a property initializer regardless of
+  declaration order.
+- **`campaignTier`/`totalCelestialObjectCount`/`fieldScale`/`WORLD_WIDTH`/
+  `WORLD_HEIGHT`/`STAR_X`/`STAR_Y`** - a new block of instance `val`s,
+  placed immediately after the companion object closes (before every
+  other property in the class) for exactly the reason the risk-assessment
+  above flagged: `starfieldStars` and `init{}`'s viewport/camera setup
+  both already read `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`, so these have
+  to resolve before either runs, and Kotlin initializes properties in
+  strict textual order. `WORLD_WIDTH`/`WORLD_HEIGHT`/`STAR_X`/`STAR_Y`
+  deliberately kept these exact same names (now instance vals instead of
+  companion `const val`s) rather than being renamed, so every other
+  existing reference to them in this file needed zero changes - a real
+  risk-reduction call given there's no compiler on this side of the
+  workflow to catch a missed rename. `STAR_X`/`STAR_Y` both now scale with
+  the field per the confirmed design (`STAR_Y = WORLD_HEIGHT * 9f/16f`,
+  proportional as Boo asked, not literally fixed).
+- **`BASE_WORLD_WIDTH`/`BASE_WORLD_HEIGHT`** (companion object) - the old
+  fixed `9f`/`16f` values, now just `fieldScale`'s baseline rather than
+  the field size itself.
+- **`WinCountDebugController`** (new file) - two on-screen tap zones
+  ("+1"/"R" for reset), stacked directly below
+  `ShotSpeedDebugController`'s row (same right-edge column, same
+  standing-permanent-debug-tool precedent as
+  `GravityDebugController`/`ShotSpeedDebugController` - no release build
+  to worry about a debug control leaking into). Wired into all three of
+  `PlayScreen`'s `InputMultiplexer`s (`fullInputProcessor`/
+  `restrictedInputProcessor`/`orderPickerInputProcessor`) plus
+  `rebuildFullInputProcessor()`, and drawn every frame via the new
+  `renderWinCountDebugControls()`, showing a live "Wins: N" readout.
+- **`SaveManager.resetWinCount()`** (new function) - sets `winCount` back
+  to 0 and persists immediately, same corruption-safe write every other
+  `SaveManager` mutator uses. Backs the debug control's "Reset" button;
+  also happens to be the same behavior the ladder design calls for at the
+  30-win "reset progress to zero" milestone, just not yet wired to a real
+  in-game menu option.
+
+**Not built this step (by design - Step D2's job):** any of
+`launchPlanetEntity`/`targetPlanetEntity`/`playerPlanets`/`aiPlanets`
+actually growing past size 1 - `campaignTier.playerPlanetCount`/
+`aiPlanetCount` are computed and drive the field-size formula, but nothing
+yet *reads* them to create additional planets/characters, so a real game
+still always has exactly 1 planet/character per side regardless of win
+count. **This means tapping the debug `+1` button past 5/20 wins will
+visibly resize the play field with no new planets/characters appearing to
+fill it - that's expected, not a bug**, and worth knowing before testing
+this step so it doesn't read as something broke.
+
+#### How to test Step D1 on-device
+
+1. Build and run a fresh game at whatever win count the save file
+   currently has. If that's under 5, everything should look and play
+   exactly as it did before this step - same field size, same single
+   planet/character per side (byte-identical at the 3-object baseline
+   tier, per the confirmed formula).
+2. From the menu, start a game and look at the bottom-right corner: below
+   the Gravity and Shot Speed tuning rows there should now be a third row
+   - two buttons ("+1" and "R") and a "Wins: N" readout matching whatever
+   `SaveManager` currently has.
+3. Tap "+1" five times (or however many needed to cross 5 total wins),
+   then back out to the menu and start a NEW game (the tier is only read
+   once, at `PlayScreen` construction - tapping mid-game does nothing
+   visible until the next new game, as noted above). The play field
+   should now be visibly larger (~15% bigger in both dimensions) than the
+   untouched-tier game, with the star sitting proportionally further from
+   center vertically too - but still only one planet/character per side,
+   per the "not built this step" note above.
+4. Tap "+1" until past 20 total wins, start another new game, and confirm
+   the field grows again (~41% bigger than the original baseline this
+   time).
+5. Tap "R" (reset), start a new game, and confirm the field returns to
+   exactly its original size - confirms `resetWinCount()` round-trips
+   cleanly and nothing about the scaling math is one-directional.
+6. Regression check: play a couple of games to reasonable completion
+   (destroy a planet, let a shot go stray, try the camera pinch/pan) at
+   whichever field size you land on - nothing about turn structure,
+   aiming, or combat should feel different, only the field's overall
+   scale and the star's position within it.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
@@ -4389,6 +4468,73 @@ exactly against this rule.
    destroyed should play exactly as before - this phase should be
    completely invisible until a planet actually dies with its character
    still alive.
+
+### Phase 29 follow-up: orbital-drift game-balance fix (Sept 2026 session), plus two still-open bugs
+
+Found while testing Step D1 (unrelated to it - this is pre-existing
+orbital-drift behavior, just noticed during that testing pass). Boo:
+destroying the enemy's planet was turning into a near-guaranteed kill,
+because a drifting character's kick speed (`ORBITAL_DRIFT_SPEED_FRACTION`,
+originally a fixed `0.2`) was only a fifth of true circular-orbit speed -
+real orbital mechanics, not a bug in the code: a tangential kick that
+slow puts the star well inside the resulting decaying ellipse's close
+approach, so the character dives into the star almost every time. Boo,
+exact words: "that makes the winning strategy to always blow up the
+planet and not aim at characters" - this made planet destruction strictly
+better than aiming at characters directly, undermining the core combat
+loop.
+
+**Fix - ✅ DONE, built and confirmed on-device:**
+- **`OrbitalDriftTuning`** (new file) - the drift-physics equivalent of
+  `ShotSpeedTuning`: a live-tunable `speedFraction` value, read fresh at
+  the moment of the kick (`driftKickVelocity`) instead of a fixed
+  constant.
+- **`OrbitalDriftDebugController`** (new file) - a fourth live-tuning
+  debug row (-/+ buttons, "Drift Speed xN.N" readout), stacked below the
+  Wins row, same standing-permanent-debug-tool precedent as
+  `GravityDebugController`/`ShotSpeedDebugController`/
+  `WinCountDebugController`. Range 0.1-2.0 (deliberately goes past 1.0 -
+  true circular-orbit speed - so an escape-trajectory kick could be felt
+  out too, not just the stable-orbit target value).
+- **Confirmed on-device: `1.0` (true circular-orbit speed) feels right.**
+  Boo tuned it live with the slider and landed on 1.0 - the working
+  theory going in - now baked in as `OrbitalDriftTuning
+  .DEFAULT_SPEED_FRACTION`'s actual default (still a live-tunable `var`,
+  same as the Gravity multiplier's own tune-then-bake-in history). The
+  slider stays wired in, not removed now that a good default was found.
+
+**Two bugs found during this same testing pass - NOT fixed yet, still
+open:**
+1. **A drifting character can visually overlap another planet's sprite**
+   instead of cleanly landing on it - Boo's screenshot showed the AI's
+   drifting character sitting inside the edge of the player's (still-
+   intact) planet. `resolveDriftLanding` already checks landing distance
+   against BOTH planets (not just the drifting character's own former
+   one), so distance-based landing detection isn't obviously wrong on its
+   own - the likely culprit is bug 2 below (a character getting frozen by
+   `freezeDrift` mid-flight, wherever it happens to be, rather than only
+   once it's actually landed) rather than a separate landing-detection
+   gap, but this hasn't been confirmed by tracing an actual repro yet.
+2. **Confirmed root cause: a drifting character can sit completely still
+   until it fires**, instead of visibly drifting right away. A planet
+   being destroyed and the shot that destroyed it resolving are usually
+   the same frame - and that frame's turn-handoff (very often passing
+   control right back to the character whose planet just died) calls
+   `activatePlayerCharacter`/`activateAiCharacter`, which freezes ANY
+   character with `drifting == true` unconditionally (see `freezeDrift`'s
+   doc comment: "freeze the instant it becomes a drifting character's
+   turn to act"). Since the drift-start code and the turn-handoff can
+   both run in that same frame, the kick gets applied and then
+   immediately zeroed/frozen before a single frame ever renders it moving
+   - the character just sits there (visually motionless, but technically
+   "drifting" per its own `drifting` flag) until `thawDrift` resumes it
+   the instant they fire. Not yet fixed - needs a real decision on what
+   SHOULD happen here (should the very first activation after a fresh
+   kick let the kick actually play out visually for a moment before
+   freezing? does bug 1's overlap happen precisely because a character
+   freezes mid-flight, overlapping whatever planet it happened to be
+   passing over at that exact frame?) - flagged for a future session,
+   not carried further this session per Boo's own pacing.
 
 ## Phase 30: multi-character combat, Step 1 (fixed 2-per-side squads, shared planet, whole-squad-then-whole-squad)
 

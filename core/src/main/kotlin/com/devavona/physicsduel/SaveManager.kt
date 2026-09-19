@@ -73,6 +73,18 @@ object SaveManager {
         persistTo(current, tmpFile, saveFile, backupFile)
     }
 
+    // Sept 2026 session - Step D1's WinCountDebugController (see
+    // PROJECT_STATE.md's "Phase 33, Step D" entry) - a debug-only shortcut
+    // for testing the Campaign progression ladder's tiers without grinding
+    // real wins. Also happens to be the same "reset progress to zero"
+    // behavior the ladder design calls for at 30 wins, just not yet wired
+    // to a real in-game menu option - see that controller's own doc
+    // comment. Never called from any non-debug path.
+    fun resetWinCount() {
+        current.winCount = 0
+        persistTo(current, tmpFile, saveFile, backupFile)
+    }
+
     /** Call once per cold start, not on every screen change - see [PhysicsDuelGame.create]. */
     fun recordAppLaunched() {
         current.appLaunchCount += 1
