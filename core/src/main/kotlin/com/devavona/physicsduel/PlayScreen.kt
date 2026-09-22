@@ -260,6 +260,29 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // tune up if a legitimate shot ever gets timed out this way.
         private const val MAX_SHOT_FLIGHT_SECONDS = 15f
 
+        // Sept 2026 session - Boo: the automatic turn-handoff (camera snap
+        // + control switch) used to fire the instant a shot resolved, which
+        // read as "clumsy" on a bigger field - it could yank the camera
+        // away while Boo was still watching the shot fly or looking around.
+        // See awaitingTurnContinue's doc comment for the full design: this
+        // is how long the game waits, showing a live "Next turn in Ns"
+        // countdown (see renderContinuePrompt), before advancing on its own
+        // if nothing is tapped - a deliberate middle ground Boo picked over
+        // either a pure fixed delay (too blunt - never actually knows if
+        // you're still looking) or a mandatory tap after every single shot
+        // (both sides, every character - correct but tedious).
+        //
+        // **Revised (Sept 2026 session, same pass):** first shipped as a
+        // static "Tap to continue" prompt at 2.5s - Boo, on-device: "it is
+        // too quick," and asked for a visible countdown instead of a static
+        // prompt so there's no guessing how much time is left. Bumped to
+        // 5s and the prompt now counts down live; a tap still skips the
+        // wait immediately, same as before. Still a plain guessed constant,
+        // not yet tuned live on-device the way ShotSpeedTuning's default
+        // was - a candidate for its own debug slider later if 5s turns out
+        // wrong in practice either.
+        private const val TURN_CONTINUE_PAUSE_SECONDS = 5f
+
         // Sept 2026 session - orbital drift. When a side's home planet is
         // destroyed while its character still has HP, that character stops
         // walking a fixed point and becomes a free Dynamic body drifting
@@ -444,10 +467,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val CATEGORY_PLAYER_AVATAR_2: Short = 0x0008
         private const val CATEGORY_AI_TARGET_2: Short = 0x0010
 
-        // Sept 2026 session - multi-character combat (Step 1). Fixed
-        // squad size for this step (Boo, explicit: "fixed squad first") -
-        // a player-facing squad-size choice isn't part of this step's scope.
-        private const val CHARACTERS_PER_SIDE = 2
+        // Sept 2026 session - Step D2 (campaign tier N-planet
+        // generalization): a 3rd AI character/planet appears at the 20-win
+        // tier (see CampaignTier) - the player's own count never exceeds 2
+        // at any tier on today's ladder, so no CATEGORY_PLAYER_AVATAR_3 is
+        // needed yet.
+        private const val CATEGORY_AI_TARGET_3: Short = 0x0020
+
+        // Sept 2026 session - Step D2. Replaces the old fixed
+        // CHARACTERS_PER_SIDE = 2 constant - squad size is now read straight
+        // off campaignTier (playerCharacterCount/aiCharacterCount, just
+        // below the companion object), since a character always occupies
+        // exactly one home planet at every tier on today's ladder (no
+        // tier shares one planet across multiple characters - "characters
+        // can share a planet" is still real machinery, kept for whenever a
+        // future tier actually needs it, but isn't exercised by any tier
+        // today). Plain `Array` lookup by character index instead of the
+        // old `if (i == 0) X else X_2` ternary, since that stops scaling
+        // past 2 - not `const`, since a Short array isn't a compile-time
+        // constant expression.
+        private val PLAYER_AVATAR_CATEGORIES: ShortArray = shortArrayOf(CATEGORY_PLAYER_AVATAR, CATEGORY_PLAYER_AVATAR_2)
+        private val AI_TARGET_CATEGORIES: ShortArray = shortArrayOf(CATEGORY_AI_TARGET, CATEGORY_AI_TARGET_2, CATEGORY_AI_TARGET_3)
 
         // Phase 20: the star stays fixed dead center of the world every
         // game (Boo, explicit: "the star stays centered") - only the two
@@ -671,6 +711,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // instead of visually drifting toward center.
     private val STAR_Y: Float = WORLD_HEIGHT * (9f / 16f)
 
+    // Sept 2026 session - Step D2 (campaign tier N-planet generalization).
+    // Replaces the old fixed CHARACTERS_PER_SIDE = 2 constant - one
+    // character per home planet at every tier on today's ladder (see
+    // CampaignTier's own doc comment), so squad size is just each side's
+    // planet count, already computed above.
+    private val playerCharacterCount: Int = campaignTier.playerPlanetCount
+    private val aiCharacterCount: Int = campaignTier.aiPlanetCount
+
     private lateinit var camera: OrthographicCamera
     private lateinit var viewport: Viewport
     private lateinit var world: World
@@ -683,13 +731,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // (player) and aiTurnController/targetCharacterBody/
     // targetCharacterEntity (AI) fields - see PlayerCharacterState/
     // AiCharacterState's own doc comments below for what each list holds.
-    // Both characters on a side share that side's one existing planet
-    // (launchPlanetPosition/targetPlanetPosition), at different random
-    // starting angles - see assignCharacterStartAngles. Fixed size
-    // CHARACTERS_PER_SIDE for this step; a real AI-targeting heuristic is
-    // still deliberately deferred (Step 3 - see PROJECT_STATE.md). Step 2
-    // (the player's own tap-to-choose turn-order picker) is now built -
-    // see awaitingPlayerOrderPick/beginPlayerOrderPick.
+    // Each character has its own home planet (see groundPlanet/
+    // assignCharacterPlanets), at its own random starting angle - see
+    // assignCharacterStartAngles. Step D2: sized to playerCharacterCount/
+    // aiCharacterCount (the campaign tier's own planet counts), not a fixed
+    // CHARACTERS_PER_SIDE anymore. Step 2 (the player's own tap-to-choose
+    // turn-order picker) is built - see awaitingPlayerOrderPick/
+    // beginPlayerOrderPick.
     private lateinit var playerCharacters: List<PlayerCharacterState>
     private lateinit var aiCharacters: List<AiCharacterState>
     // Whole-squad-then-whole-squad turn order (Boo, explicit: "fixed squad
@@ -754,13 +802,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // drifts and lands independently, even though (per Boo, "characters
     // can share a planet") a shared planet's destruction starts every
     // living character on that side drifting in the same frame - see the
-    // trigger check in render(). [driftResolved] latching true the moment
-    // a character lands means the still-destroyed origin planet never
-    // re-triggers a second drift for that character - a real limitation
-    // (if the planet it re-anchors onto is LATER also destroyed, it does
-    // not drift a second time), not an oversight, same as the original
-    // single-character design - see PROJECT_STATE.md's orbital-drift entry.
-    private class PlayerCharacterState(val controller: AvatarMovementController, val body: Body, val entity: Entity) {
+    // trigger check in render().
+    //
+    // **Bug fix (Sept 2026 session):** [driftResolved] used to latch true
+    // permanently the moment a character landed, on the theory that the
+    // planet it re-anchored onto could never itself be destroyed later -
+    // true in the original single-planet-per-side world, but false once
+    // Step D2 let a drifting character land on a DIFFERENT, still-intact
+    // planet. Boo, on-device: a character drifted off its own destroyed
+    // planet, landed on the enemy's planet instead, that planet later got
+    // destroyed too, and the character was left stranded in space -
+    // nothing was watching that second destruction, since [groundPlanet]
+    // (see its own doc comment) never updated past the character's
+    // ORIGINAL planet. [checkPlayerDriftLanding]/[checkAiDriftLanding] now
+    // update [groundPlanet] to whatever was actually landed on and clear
+    // [driftResolved] again on every successful landing, so a second (or
+    // third) drift can trigger if that new ground is destroyed too.
+    private class PlayerCharacterState(val controller: AvatarMovementController, val body: Body, val entity: Entity, var groundPlanet: Planet) {
         var drifting = false
         var driftResolved = false
         var driftFrozenVelocity: Vector2? = null
@@ -780,7 +838,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /** The AI-side twin of [PlayerCharacterState] - see that class's doc comment. */
-    private class AiCharacterState(val controller: AiTurnController, val body: Body, val entity: Entity) {
+    private class AiCharacterState(val controller: AiTurnController, val body: Body, val entity: Entity, var groundPlanet: Planet) {
         var drifting = false
         var driftResolved = false
         var driftFrozenVelocity: Vector2? = null
@@ -814,6 +872,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private var activeShotOutsideFieldSeconds = 0f
     private var activeShotElapsedSeconds = 0f
     private var pendingTurnHandoff: (() -> Unit)? = null
+
+    // Sept 2026 session - Boo: the automatic handoff used to fire
+    // [pendingTurnHandoff] the instant a shot resolved (see
+    // [resolveActiveShot]), which could yank the camera/control away while
+    // Boo was still watching the shot fly or looking around, especially on
+    // a bigger field. [awaitingTurnContinue] is true from the moment a shot
+    // resolves with a real [pendingTurnHandoff] waiting, until either
+    // [ContinueTapInputProcessor] sees a tap or [turnContinuePauseElapsed]
+    // reaches [TURN_CONTINUE_PAUSE_SECONDS] on its own - either path calls
+    // [continueToNextTurn], which is the only thing that actually invokes
+    // [pendingTurnHandoff] now. Nothing else changes while this is true:
+    // the world keeps rendering/simulating exactly as it already was
+    // (a drifting character keeps drifting, a stray missile keeps existing,
+    // etc.) - this only holds back the "whose turn/where's the camera"
+    // step, same narrow scope [pendingTurnHandoff] itself always had.
+    private var awaitingTurnContinue = false
+    private var turnContinuePauseElapsed = 0f
 
     // Sept 2026 session - a shot that resolved via the field-exit timeout
     // or the MAX_SHOT_FLIGHT_SECONDS backstop above (rather than an
@@ -852,15 +927,25 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private lateinit var orderPickerInputProcessor: InputMultiplexer
     private lateinit var projectileContactListener: ProjectileContactListener
     private lateinit var launchPoint: Vector2
+    // Sept 2026 session - Step D2. SlingshotInputProcessor is one shared
+    // instance across every player-character turn (unlike AiTurnController,
+    // which gets its own fixed planetCenter per character at construction -
+    // see that class's own doc comment), so its planetCenter needs to be a
+    // live-mutated Vector2, same pattern launchPoint already is - updated
+    // every frame in render() to whichever player character currently has
+    // the turn's own home planet.
+    private lateinit var activePlayerPlanetCenter: Vector2
     private lateinit var gravitySystem: GravitySystem
 
-    // Phase 20: randomized once per [init] by [randomizePlanetPositions] -
-    // replaces the old fixed LAUNCH_PLANET_X/TARGET_PLANET_X/PLANETS_Y
-    // constants. Everything that used to reference those now reads these
-    // instead (star creation, planet bodies, AI/avatar planetCenter,
-    // rendering).
-    private lateinit var launchPlanetPosition: Vector2
-    private lateinit var targetPlanetPosition: Vector2
+    // Sept 2026 session - Step D2 (campaign tier N-planet generalization).
+    // Replaces the old fixed launchPlanetPosition/targetPlanetPosition pair
+    // (exactly one planet per side) - randomized once per [init] by
+    // [randomizePlanetPositions], sized to campaignTier.playerPlanetCount/
+    // aiPlanetCount. Everything that used to reference the old singular
+    // fields now either loops over these or reads a specific character's
+    // own [PlayerCharacterState.groundPlanet]/[AiCharacterState.groundPlanet].
+    private lateinit var playerPlanetPositions: List<Vector2>
+    private lateinit var aiPlanetPositions: List<Vector2>
     private lateinit var gravityDebugController: GravityDebugController
     // Phase 17 - shotSpeedTuning is the live-adjustable value itself
     // (read by SlingshotInputProcessor, aiTurnController, and the aim
@@ -1001,29 +1086,37 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     private val trailFamily = Family.all(TrailComponent::class.java, PhysicsBodyComponent::class.java).get()
     // A direct reference, not a family query, because the star also carries
     // GravitySourceComponent now - a family query alone couldn't tell the
-    // HUD which one to read. Kept even after the entity is removed from the
-    // engine (on destruction) so renderStatsPanel can still read its
-    // final mass/isDestroyed state - see that method.
-    private lateinit var targetPlanetEntity: Entity
-    /** Same pattern as [targetPlanetEntity], for the launch planet once it also became a real gravity source - see that field's doc comment. */
-    private lateinit var launchPlanetEntity: Entity
+    // HUD which one to read. Kept even after an entity is removed from the
+    // engine (on destruction) so renderStatsPanel can still read its final
+    // mass/isDestroyed state - see that method. Step D2: the old fixed
+    // targetPlanetEntity/launchPlanetEntity pair is gone - every planet's
+    // Entity now lives on its own Planet.entity (see that class's doc
+    // comment), read from playerPlanets/aiPlanets or a character's own
+    // PlayerCharacterState.groundPlanet/AiCharacterState.groundPlanet instead.
 
     /**
      * Sept 2026 session - "Planet/character scaling" design (see
-     * PROJECT_STATE.md), Step A. A side-agnostic wrapper around one
-     * planet's geometry/entity - [currentCelestialObstacles] and
-     * [assignCharacterPlanets] both read these lists rather than reaching
-     * for [launchPlanetPosition]/[targetPlanetPosition] directly, so
-     * later steps can grow [playerPlanets]/[aiPlanets] past size 1 without
-     * touching either of those two call sites again. Everything else in
-     * this file (rendering, drift, the horizon check, randomizePlanetPositions)
-     * still reads the original [launchPlanetPosition]/[targetPlanetPosition]
-     * and [launchPlanetEntity]/[targetPlanetEntity] fields directly -
-     * deliberately untouched this step (see the design note's "Step A" vs
-     * "Step C" split) - [playerPlanets]/[aiPlanets] are just a thin,
-     * always-in-sync view over those same fields for now.
+     * PROJECT_STATE.md). A side-agnostic wrapper around one planet's
+     * geometry/entity/body - [currentCelestialObstacles], [assignCharacterPlanets],
+     * rendering, drift, and the stats panel all read [playerPlanets]/
+     * [aiPlanets] rather than any fixed-count singular field.
+     *
+     * **Step D2 (campaign tier N-planet generalization).** [playerPlanets]/
+     * [aiPlanets] are now REAL, sized to campaignTier.playerPlanetCount/
+     * aiPlanetCount (1-2 and 1-3 respectively, per the campaign ladder) -
+     * Steps A-C already generalized everything downstream of these two
+     * lists (obstacle avoidance, planet-sharing/start-angle placement), so
+     * this step's actual work was building real N-sized lists here and
+     * fixing the handful of remaining call sites that still read a fixed
+     * launchPlanet-/targetPlanet-prefixed singular field directly instead of
+     * going through these lists or a character's own [PlayerCharacterState
+     * .groundPlanet]/[AiCharacterState.groundPlanet]. [body] added this step
+     * purely so [debugRenderer]'s wireframe-hiding override and
+     * [resolveDriftLanding]'s landing check can identify/locate any planet
+     * generically, without a fixed launchPlanetBody/targetPlanetBody pair
+     * to fall back on anymore.
      */
-    private class Planet(val entity: Entity, val position: Vector2, val radius: Float)
+    private class Planet(val entity: Entity, val position: Vector2, val radius: Float, val body: Body)
     private lateinit var playerPlanets: List<Planet>
     private lateinit var aiPlanets: List<Planet>
     // Sept 2026 session - "Planet/character scaling" design. Cycling
@@ -1112,13 +1205,14 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         return minOf(diff, 360f - diff)
     }
 
-    // Sept 2026 session - direct Body references (same pattern as avatarBody/
+    // Sept 2026 session - direct Body reference (same pattern as avatarBody/
     // targetCharacterBody above) purely so debugRenderer's overridden
-    // renderBody can identify and skip exactly these three bodies by
-    // reference - see debugRenderer's construction in init{} for why.
+    // renderBody can identify and skip it by reference - see debugRenderer's
+    // construction in init{} for why. Step D2: the old launchPlanetBody/
+    // targetPlanetBody twin fields are gone - every planet's Body now lives
+    // on its own Planet.body (see that class's doc comment), read from
+    // playerPlanets/aiPlanets instead of a fixed pair.
     private lateinit var starBody: Body
-    private lateinit var launchPlanetBody: Body
-    private lateinit var targetPlanetBody: Body
 
     init {
         Box2D.init()
@@ -1176,7 +1270,31 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // super.renderBody and draws exactly as before.
         debugRenderer = object : Box2DDebugRenderer() {
             override fun renderBody(body: Body) {
-                if (body === starBody || body === launchPlanetBody || body === targetPlanetBody) return
+                // Step D2 - playerPlanets/aiPlanets/playerCharacters/
+                // aiCharacters aren't assigned until later in this same
+                // init{} block, but that's fine here too: renderBody is
+                // never actually called until the first real render()
+                // frame, well after init{} finishes - same lazy-read-at-
+                // call-time safety the old launchPlanetBody/
+                // targetPlanetBody fields already relied on.
+                if (body === starBody) return
+                if (playerPlanets.any { it.body === body } || aiPlanets.any { it.body === body }) return
+                // Bug fix (Sept 2026 session) - see resolveDriftLanding's
+                // own doc comment for the other half of this fix (actually
+                // freezing a drifting character's body once it's confirmed
+                // defeated). A normally-killed character's body is
+                // eventually destroyed outright by
+                // ProjectileContactListener.flushRemovals, so it simply
+                // stops appearing here at all - this check only ever
+                // matters for a drift-defeated character, whose body keeps
+                // existing (frozen) rather than being destroyed. Boo,
+                // on-device: "the green circle outline remains and
+                // constantly rolls around the sun" - freezing the body
+                // alone stops the motion; this stops the leftover wireframe
+                // dot too, same as a normal defeat's sprite already hides.
+                if (playerCharacters.any { it.body === body && healthMapper.get(it.entity).isDefeated } ||
+                    aiCharacters.any { it.body === body && healthMapper.get(it.entity).isDefeated }
+                ) return
                 super.renderBody(body)
             }
         }
@@ -1209,25 +1327,38 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // any damage, and that the AI's shots looked wrong in ways that
         // make sense once you know his planet was never pulling on
         // anything - both planets now get identical treatment.
-        launchPlanetBody = createPlanet(launchPlanetPosition.x, launchPlanetPosition.y)
-        launchPlanetEntity = Entity().apply {
-            add(PhysicsBodyComponent(launchPlanetBody))
-            add(GravitySourceComponent(initialMass = LAUNCH_PLANET_MASS))
+        //
+        // Step D2 (campaign tier N-planet generalization) - replaces the
+        // old fixed single launchPlanetBody/launchPlanetEntity and
+        // targetPlanetBody/targetPlanetEntity pair with real per-planet
+        // construction, one Body/Entity per position in
+        // playerPlanetPositions/aiPlanetPositions (sized to
+        // campaignTier.playerPlanetCount/aiPlanetCount - see
+        // randomizePlanetPositions). Every planet on a side gets that
+        // side's same fixed mass constant and the same reused texture
+        // (renderCelestialSprites) - no size/mass variation between same-
+        // side planets yet, that's a separate later polish pass, not part
+        // of this step's scope. The star itself isn't in either list since
+        // it's side-less and never destroyed - currentCelestialObstacles
+        // adds it separately.
+        playerPlanets = playerPlanetPositions.map { position ->
+            val body = createPlanet(position.x, position.y)
+            val entity = Entity().apply {
+                add(PhysicsBodyComponent(body))
+                add(GravitySourceComponent(initialMass = LAUNCH_PLANET_MASS))
+            }
+            engine.addEntity(entity)
+            Planet(entity, position, PLANET_RADIUS, body)
         }
-        engine.addEntity(launchPlanetEntity)
-        targetPlanetBody = createPlanet(targetPlanetPosition.x, targetPlanetPosition.y)
-        targetPlanetEntity = Entity().apply {
-            add(PhysicsBodyComponent(targetPlanetBody))
-            add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
+        aiPlanets = aiPlanetPositions.map { position ->
+            val body = createPlanet(position.x, position.y)
+            val entity = Entity().apply {
+                add(PhysicsBodyComponent(body))
+                add(GravitySourceComponent(initialMass = TARGET_PLANET_MASS))
+            }
+            engine.addEntity(entity)
+            Planet(entity, position, PLANET_RADIUS, body)
         }
-        engine.addEntity(targetPlanetEntity)
-
-        // Sept 2026 session - "Planet/character scaling" design, Step A -
-        // see [Planet]'s own doc comment. Size 1 each today; the star
-        // itself isn't in either list since it's side-less and never
-        // destroyed - [currentCelestialObstacles] adds it separately.
-        playerPlanets = listOf(Planet(launchPlanetEntity, launchPlanetPosition, PLANET_RADIUS))
-        aiPlanets = listOf(Planet(targetPlanetEntity, targetPlanetPosition, PLANET_RADIUS))
         trajectorySimulator = TrajectorySimulator(GravitySystem.G, GravitySystem.MIN_DISTANCE)
 
         // shotSpeedTuning is referenced below by shotSpeedMultiplier/
@@ -1240,25 +1371,30 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
         // Sept 2026 session - "Planet/character scaling" design. See
         // assignCharacterPlanets/assignCharacterStartAngles' own doc
-        // comments - with playerPlanets/aiPlanets both size 1 today, every
-        // character on a side still shares that side's one planet, now at
-        // a genuinely random (not fixed ±) angle apart per Step B.
-        val aiCharacterPlanets = assignCharacterPlanets(aiPlanets, CHARACTERS_PER_SIDE)
-        val playerCharacterPlanets = assignCharacterPlanets(playerPlanets, CHARACTERS_PER_SIDE)
+        // comments. Step D2: aiCharacterCount/playerCharacterCount now
+        // equal aiPlanets.size/playerPlanets.size at every tier on today's
+        // ladder (one character per home planet), so assignCharacterPlanets'
+        // round-robin-sharing behavior isn't actually exercised today - kept
+        // as real, working machinery for whenever a future tier needs it
+        // (see that function's own doc comment).
+        val aiCharacterPlanets = assignCharacterPlanets(aiPlanets, aiCharacterCount)
+        val playerCharacterPlanets = assignCharacterPlanets(playerPlanets, playerCharacterCount)
         val aiCharacterStartAngles = assignCharacterStartAngles(aiCharacterPlanets)
         val playerCharacterStartAngles = assignCharacterStartAngles(playerCharacterPlanets)
 
         // Sept 2026 session - multi-character combat (Step 1). Builds
-        // CHARACTERS_PER_SIDE independent AiTurnControllers sharing
-        // targetPlanetPosition (Boo: "characters can share a planet"), each
-        // at its own random start angle (see assignCharacterStartAngles)
-        // and its own collision category. onFire/onTurnComplete both
-        // capture `aiCharacters[i]` - safe even though the `aiCharacters`
-        // list itself isn't assigned until this whole expression finishes,
-        // since these closures capture the `aiCharacters` *property*, only
-        // ever invoked later during real gameplay.
-        aiCharacters = (0 until CHARACTERS_PER_SIDE).map { i ->
-            val category = if (i == 0) CATEGORY_AI_TARGET else CATEGORY_AI_TARGET_2
+        // aiCharacterCount independent AiTurnControllers (Step D2: was a
+        // fixed CHARACTERS_PER_SIDE, now the campaign tier's own AI count -
+        // up to 3 at the 20-win tier), each at its own random start angle
+        // (see assignCharacterStartAngles), its own home planet (see
+        // Planet/groundPlanet), and its own collision category (see
+        // AI_TARGET_CATEGORIES). onFire/onTurnComplete both capture
+        // `aiCharacters[i]` - safe even though the `aiCharacters` list
+        // itself isn't assigned until this whole expression finishes, since
+        // these closures capture the `aiCharacters` *property*, only ever
+        // invoked later during real gameplay.
+        aiCharacters = (0 until aiCharacterCount).map { i ->
+            val category = AI_TARGET_CATEGORIES[i]
             val controller = AiTurnController(
                 planetCenter = Vector2(aiCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
@@ -1312,15 +1448,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 add(HealthComponent(TARGET_MAX_HP))
             }
             engine.addEntity(entity)
-            AiCharacterState(controller, body, entity)
+            AiCharacterState(controller, body, entity, aiCharacterPlanets[i])
         }
 
         // Sept 2026 session - multi-character combat (Step 1). The player-
         // side twin of the aiCharacters construction above - see that
         // block's doc comment for the closure-capture reasoning, identical
-        // here.
-        playerCharacters = (0 until CHARACTERS_PER_SIDE).map { i ->
-            val category = if (i == 0) CATEGORY_PLAYER_AVATAR else CATEGORY_PLAYER_AVATAR_2
+        // here. Step D2: playerCharacterCount replaces the old fixed
+        // CHARACTERS_PER_SIDE (never exceeds 2 at any tier on today's
+        // ladder, so PLAYER_AVATAR_CATEGORIES only needs 2 entries).
+        playerCharacters = (0 until playerCharacterCount).map { i ->
+            val category = PLAYER_AVATAR_CATEGORIES[i]
             val controller = AvatarMovementController(
                 planetCenter = Vector2(playerCharacterPlanets[i].position),
                 planetRadius = PLANET_RADIUS,
@@ -1336,13 +1474,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 add(HealthComponent(AVATAR_MAX_HP))
             }
             engine.addEntity(entity)
-            PlayerCharacterState(controller, body, entity)
+            PlayerCharacterState(controller, body, entity, playerCharacterPlanets[i])
         }
         launchPoint = Vector2(activePlayerCharacter().controller.position)
+        // Step D2 - see this field's own doc comment: a live-mutated
+        // Vector2, kept in sync with whichever player character currently
+        // has the turn's own home planet (render() updates it every frame,
+        // right alongside launchPoint).
+        activePlayerPlanetCenter = Vector2(activePlayerCharacter().groundPlanet.position)
 
         slingshotInputProcessor = SlingshotInputProcessor(
             launchPoint = launchPoint,
-            planetCenter = launchPlanetPosition,
+            planetCenter = activePlayerPlanetCenter,
             planetRadius = PLANET_RADIUS,
             viewport = viewport,
             powerScale = PULL_POWER_SCALE,
@@ -1359,7 +1502,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                     thawDrift(pc.body, pc.driftFrozenVelocity)
                     pc.driftFrozenVelocity = null
                 }
-                fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = if (activePlayerIndex == 0) CATEGORY_PLAYER_AVATAR else CATEGORY_PLAYER_AVATAR_2)
+                fireMissile(launchPoint, velocity, side = Side.PLAYER, excludeCategory = PLAYER_AVATAR_CATEGORIES[activePlayerIndex])
                 pc.controller.onFired()
             }
         )
@@ -1410,6 +1553,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             addProcessor(shotSpeedDebugController)
             addProcessor(winCountDebugController)
             addProcessor(orbitalDriftDebugController)
+            // Sept 2026 session - see ContinueTapInputProcessor's own doc
+            // comment for why this is last.
+            addProcessor(ContinueTapInputProcessor())
         }
         // Step 2 - multi-character combat: the player's own turn-order
         // picker's InputMultiplexer, swapped in only during
@@ -1442,6 +1588,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                 return true
             }
             return false
+        }
+    }
+
+    /**
+     * Sept 2026 session - see [awaitingTurnContinue]'s doc comment. Lives
+     * only in [restrictedInputProcessor] (the multiplexer already active
+     * for the whole "shot in flight, then waiting on the handoff" window,
+     * for both sides - see that field's own doc comment), registered LAST
+     * so a tap that actually lands on a debug button (gravity/shot speed/
+     * win count/drift sliders, all earlier in the same multiplexer) still
+     * does whatever it always did instead of also continuing the turn.
+     * Returns false (lets the tap fall through with no effect) whenever
+     * nothing is actually waiting - a tap during ordinary gameplay, before
+     * this was added, was already a no-op through this same processor
+     * chain, so this changes nothing when [awaitingTurnContinue] is false.
+     */
+    private inner class ContinueTapInputProcessor : InputAdapter() {
+        override fun touchDown(screenX: Int, screenY: Int, pointer: Int, button: Int): Boolean {
+            if (!awaitingTurnContinue) return false
+            continueToNextTurn()
+            return true
         }
     }
 
@@ -1670,16 +1837,30 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * [PlayerOrderPickerInputProcessor]'s doc comments. Only ever called
      * from [handOffToPlayer] when at least two of the player's characters
      * are still alive, so there's a genuine choice to make. Reframes the
-     * camera on the shared planet itself (not a specific character - Boo
-     * hasn't tapped one yet) at the same [AVATAR_SNAP_ZOOM] every other
-     * turn-transition uses, which already shows the whole planet clearly
-     * (see that constant's doc comment) - plenty to see and tap either
-     * living character on it.
+     * camera at the same [AVATAR_SNAP_ZOOM] every other turn-transition
+     * uses.
+     *
+     * **Step D2:** used to always reframe on "the" shared planet (every
+     * player tier had exactly one, with both characters standing on it
+     * together) - with the 20-win tier giving the player 2 SEPARATE planets
+     * (one character each, not shared - see [assignCharacterPlanets]'s doc
+     * comment), there's no longer one single planet to frame on. Reframes
+     * on the midpoint between every living player planet instead - a
+     * reasonable first cut, not confirmed on-device yet at the 20-win tier
+     * specifically; may need a real zoom-to-fit later if [AVATAR_SNAP_ZOOM]
+     * turns out too tight to show both planets Boo needs to tap between.
      */
     private fun beginPlayerOrderPick() {
         awaitingPlayerOrderPick = true
         Gdx.input.inputProcessor = orderPickerInputProcessor
-        snapCameraToActiveAvatar(launchPlanetPosition)
+        snapCameraToActiveAvatar(centerOf(playerPlanets.map { it.position }))
+    }
+
+    /** Average of [positions] - see [beginPlayerOrderPick]'s doc comment. */
+    private fun centerOf(positions: List<Vector2>): Vector2 {
+        val sum = Vector2()
+        positions.forEach { sum.add(it) }
+        return sum.scl(1f / positions.size)
     }
 
     /**
@@ -1703,46 +1884,58 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
 
     /**
      * Phase 20, generalized in the "Planet/character scaling" design's
-     * Step C: picks fresh [launchPlanetPosition]/[targetPlanetPosition]
-     * for this game via the N-capable [generateScatteredPositions] instead
-     * of two separate single-planet draws - same guarantees as before
-     * (each clear of the star, and clear of each other by
-     * [MIN_PLANET_SEPARATION]), now going through the same machinery a
-     * future step can call with a bigger count once the campaign ladder
-     * needs more planets per side. The star-*flight-path* check
-     * ([planetLayoutIsClear]) is specific to having exactly a launch/
-     * target *pair* - which of N>2 planets would even count as "the"
-     * flight path stops being well-defined - so it stays a separate
-     * post-check here: on failure, the whole pair is redrawn via a fresh
-     * [generateScatteredPositions] call (simpler than trying to keep one
-     * position and patch the other), up to [PLANET_PLACEMENT_MAX_ATTEMPTS]
-     * tries, same budget as before.
+     * Step C, and again in Step D2 for real N-planet campaign tiers: picks
+     * fresh [playerPlanetPositions]/[aiPlanetPositions] via the N-capable
+     * [generateScatteredPositions] - same per-point guarantees as before
+     * (every position clear of the star, and clear of every OTHER position
+     * by [MIN_PLANET_SEPARATION] - [generateScatteredPositions] already
+     * checks each new candidate against every point placed so far,
+     * regardless of side, so that part needs no separate re-check here).
+     * The one thing [generateScatteredPositions] can't guarantee on its own
+     * is the star staying clear of every possible missile flight path
+     * between the two sides - see [planetLayoutIsClear] - so on failure the
+     * whole layout is redrawn via a fresh [generateScatteredPositions] call
+     * (simpler than trying to keep some positions and patch others), up to
+     * [PLANET_PLACEMENT_MAX_ATTEMPTS] tries, same budget as before.
      */
     private fun randomizePlanetPositions() {
         var attempts = 0
         do {
-            val positions = generateScatteredPositions(2)
-            launchPlanetPosition = positions[0]
-            targetPlanetPosition = positions[1]
+            val positions = generateScatteredPositions(campaignTier.playerPlanetCount + campaignTier.aiPlanetCount)
+            playerPlanetPositions = positions.subList(0, campaignTier.playerPlanetCount).toList()
+            aiPlanetPositions = positions.subList(campaignTier.playerPlanetCount, positions.size).toList()
             attempts++
         } while (!planetLayoutIsClear() && attempts < PLANET_PLACEMENT_MAX_ATTEMPTS)
     }
 
     /**
-     * True once the current [launchPlanetPosition]/[targetPlanetPosition]
-     * pair satisfies both layout rules: the planets aren't too close to
-     * each other, and - the bug this method was added to fix - the star
-     * isn't sitting too close to the direct path between them (checked
-     * against the actual line *segment*, via [distanceFromSegment], not
-     * the infinite line - the star being far off to the side of where the
-     * segment happens to extend to doesn't count as "in the way").
+     * True once the current [playerPlanetPositions]/[aiPlanetPositions]
+     * layout satisfies its one remaining layout rule - the bug this method
+     * was originally added to fix: the star isn't sitting too close to a
+     * direct missile path between the two sides (checked against the
+     * actual line *segment*, via [distanceFromSegment], not the infinite
+     * line - the star being far off to the side of where a segment happens
+     * to extend to doesn't count as "in the way"). Planet-to-planet
+     * separation is already guaranteed by [generateScatteredPositions]
+     * itself, regardless of side - see [randomizePlanetPositions]'s doc
+     * comment.
+     *
+     * **Step D2:** with N>2 planets there's no longer one single "the"
+     * flight path - generalized to every player-planet/AI-planet pairing
+     * (the only pairings a missile actually ever needs to cross between),
+     * since any of the player's planets could end up firing at any of the
+     * AI's. At today's 1-vs-1 base tier this is exactly the original
+     * single-pair check; it grows to up to 2*3 = 6 pairings at the 20-win
+     * tier.
      */
     private fun planetLayoutIsClear(): Boolean {
-        if (targetPlanetPosition.dst(launchPlanetPosition) < MIN_PLANET_SEPARATION) return false
-        val starDistanceFromPath = distanceFromSegment(
-            Vector2(STAR_X, STAR_Y), launchPlanetPosition, targetPlanetPosition
-        )
-        return starDistanceFromPath >= MIN_STAR_FLIGHT_PATH_CLEARANCE
+        for (playerPosition in playerPlanetPositions) {
+            for (aiPosition in aiPlanetPositions) {
+                val starDistanceFromPath = distanceFromSegment(Vector2(STAR_X, STAR_Y), playerPosition, aiPosition)
+                if (starDistanceFromPath < MIN_STAR_FLIGHT_PATH_CLEARANCE) return false
+            }
+        }
+        return true
     }
 
     /** Shortest distance from [point] to the finite line segment [a]-[b] (not the infinite line each defines). */
@@ -2072,12 +2265,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * is found resolved, either via impact (already destroyed by
      * [ProjectileContactListener]) or a timeout - field-exit or the
      * [MAX_SHOT_FLIGHT_SECONDS] backstop - (handled by the caller via
-     * [addStray] before calling this). Fires whatever handoff
-     * had been stashed in [pendingTurnHandoff] - see [shotResolved]'s doc
-     * comment - or, if the turn hasn't actually been passed yet (the
-     * player can still be mid post-shot repositioning when a shot resolves
-     * early), just clears the tracking so the eventual onTurnPassed/
-     * onTurnComplete call sees shotResolved already true and hands off
+     * [addStray] before calling this).
+     *
+     * Used to fire [pendingTurnHandoff] immediately; now (see
+     * [awaitingTurnContinue]'s doc comment) it just starts the "Tap to
+     * continue" wait if a real handoff is actually waiting - [continueToNextTurn]
+     * is what actually invokes it, either from a tap or the auto-advance
+     * timer. If [pendingTurnHandoff] is null (the turn hasn't actually been
+     * passed yet - the player can still be mid post-shot repositioning when
+     * a shot resolves early), there's nothing to wait for: this just clears
+     * the tracking so the eventual onTurnPassed/onTurnComplete call sees
+     * shotResolved already true and hands off (and starts its own wait)
      * immediately instead of waiting on a shot that's already done.
      */
     private fun resolveActiveShot() {
@@ -2086,8 +2284,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         activeShotSide = null
         activeShotOutsideFieldSeconds = 0f
         activeShotElapsedSeconds = 0f
-        pendingTurnHandoff?.invoke()
+        if (pendingTurnHandoff != null) {
+            awaitingTurnContinue = true
+            turnContinuePauseElapsed = 0f
+        }
+    }
+
+    /**
+     * Sept 2026 session - see [awaitingTurnContinue]'s doc comment. The
+     * only thing that actually invokes [pendingTurnHandoff] now - called
+     * either by [ContinueTapInputProcessor] (a tap while waiting) or
+     * render()'s own auto-advance check once [turnContinuePauseElapsed]
+     * reaches [TURN_CONTINUE_PAUSE_SECONDS]. A no-op if nothing is actually
+     * waiting (defensive - neither caller should reach this otherwise, but
+     * costs nothing to guard).
+     */
+    private fun continueToNextTurn() {
+        if (!awaitingTurnContinue) return
+        awaitingTurnContinue = false
+        val handoff = pendingTurnHandoff
         pendingTurnHandoff = null
+        handoff?.invoke()
     }
 
     /**
@@ -2206,13 +2423,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     private fun beginPlayerDrift(pc: PlayerCharacterState) {
-        beginDrift(pc.body, pc.entity, launchPlanetPosition, launchPlanetEntity) { pc.controller.beginDrift(it) }
+        beginDrift(pc.body, pc.entity, pc.groundPlanet.position, pc.groundPlanet.entity) { pc.controller.beginDrift(it) }
         pc.drifting = true
     }
 
     /** The AI-side twin of [beginPlayerDrift]. */
     private fun beginAiDrift(ac: AiCharacterState) {
-        beginDrift(ac.body, ac.entity, targetPlanetPosition, targetPlanetEntity) { ac.controller.beginDrift(it) }
+        beginDrift(ac.body, ac.entity, ac.groundPlanet.position, ac.groundPlanet.entity) { ac.controller.beginDrift(it) }
         ac.drifting = true
     }
 
@@ -2280,52 +2497,86 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * physics/damage work of the old checkPlayerDriftLanding/
      * checkAiDriftLanding (see their preserved reasoning above), taking
      * whichever character's [body]/[entity]/[radius] it applies to. Returns
-     * what happened and, if it landed, exactly where - the thin per-side
-     * wrappers below apply that to the right controller/state fields.
+     * what happened and, on a landing, the actual [Planet] landed on (not
+     * just its position) - the thin per-side wrappers below need the whole
+     * [Planet] now, not just where it is, so they can re-ground that
+     * character onto it (see [PlayerCharacterState.groundPlanet]'s doc
+     * comment).
+     *
+     * **Step D2:** used to check exactly the launch/target planet pair -
+     * generalized to every still-surviving planet on either side
+     * ([playerPlanets] + [aiPlanets]), since a drifting character can now
+     * land on any of them, not just its own former home planet or the
+     * other side's single planet.
+     *
+     * **Bug fix (Sept 2026 session):** flying into the star used to just
+     * deal lethal damage and leave [body] exactly as it was - still
+     * Dynamic, still under gravity, so a now-defeated (sprite hidden)
+     * character kept right on drifting/orbiting forever, invisible except
+     * for its own debug wireframe. Boo, on-device: "the green circle
+     * outline remains and constantly rolls around the sun." Now freezes
+     * [body] the same way a LANDED outcome already does (Kinematic, zero
+     * velocity, no more [GravityAffectedComponent]) - see [debugRenderer]'s
+     * own construction for the other half of this fix (hiding a defeated
+     * character's wireframe entirely, not just stopping its motion).
      */
-    private fun resolveDriftLanding(body: Body, entity: Entity, radius: Float): Pair<DriftLandingOutcome, Vector2?> {
+    private fun resolveDriftLanding(body: Body, entity: Entity, radius: Float): Pair<DriftLandingOutcome, Planet?> {
         val position = body.position
         val health = healthMapper.get(entity)
         if (position.dst(STAR_X, STAR_Y) <= STAR_RADIUS + radius) {
             health.applyDamage(health.maxHp)
+            body.type = BodyDef.BodyType.KinematicBody
+            body.linearVelocity = Vector2.Zero
+            entity.remove(GravityAffectedComponent::class.java)
             return DriftLandingOutcome.HIT_STAR to null
         }
-        val landedPlanetPosition = when {
-            !gravitySourceMapper.get(launchPlanetEntity).isDestroyed && position.dst(launchPlanetPosition) <= PLANET_RADIUS + radius -> launchPlanetPosition
-            !gravitySourceMapper.get(targetPlanetEntity).isDestroyed && position.dst(targetPlanetPosition) <= PLANET_RADIUS + radius -> targetPlanetPosition
-            else -> null
+        val landedPlanet = (playerPlanets + aiPlanets).firstOrNull { planet ->
+            !gravitySourceMapper.get(planet.entity).isDestroyed && position.dst(planet.position) <= planet.radius + radius
         } ?: return DriftLandingOutcome.AIRBORNE to null
 
         health.applyDamage(ORBITAL_DRIFT_LANDING_DAMAGE)
         body.type = BodyDef.BodyType.KinematicBody
         body.linearVelocity = Vector2.Zero
         entity.remove(GravityAffectedComponent::class.java)
-        return DriftLandingOutcome.LANDED to landedPlanetPosition
+        return DriftLandingOutcome.LANDED to landedPlanet
     }
 
     private fun checkPlayerDriftLanding(pc: PlayerCharacterState) {
-        val (outcome, landedAt) = resolveDriftLanding(pc.body, pc.entity, AVATAR_RADIUS)
+        val (outcome, landedPlanet) = resolveDriftLanding(pc.body, pc.entity, AVATAR_RADIUS)
         if (outcome == DriftLandingOutcome.AIRBORNE) return
+        pc.drifting = false
         if (outcome == DriftLandingOutcome.LANDED) {
             pc.driftFrozenVelocity = null
-            val landingAngleDegrees = atan2(pc.body.position.y - landedAt!!.y, pc.body.position.x - landedAt.x) * MathUtils.radiansToDegrees
+            val landedAt = landedPlanet!!.position
+            val landingAngleDegrees = atan2(pc.body.position.y - landedAt.y, pc.body.position.x - landedAt.x) * MathUtils.radiansToDegrees
             pc.controller.reanchor(landedAt, landingAngleDegrees)
+            // Bug fix (Sept 2026 session) - see PlayerCharacterState's own
+            // doc comment: re-ground onto whichever planet was actually
+            // landed on (may not be the one this character started on) and
+            // re-arm driftResolved so THAT planet's eventual destruction
+            // can trigger a second drift instead of stranding this character.
+            pc.groundPlanet = landedPlanet
+            pc.driftResolved = false
+        } else {
+            pc.driftResolved = true
         }
-        pc.drifting = false
-        pc.driftResolved = true
     }
 
     /** The AI-side twin of [checkPlayerDriftLanding]. */
     private fun checkAiDriftLanding(ac: AiCharacterState) {
-        val (outcome, landedAt) = resolveDriftLanding(ac.body, ac.entity, TARGET_RADIUS)
+        val (outcome, landedPlanet) = resolveDriftLanding(ac.body, ac.entity, TARGET_RADIUS)
         if (outcome == DriftLandingOutcome.AIRBORNE) return
+        ac.drifting = false
         if (outcome == DriftLandingOutcome.LANDED) {
             ac.driftFrozenVelocity = null
-            val landingAngleDegrees = atan2(ac.body.position.y - landedAt!!.y, ac.body.position.x - landedAt.x) * MathUtils.radiansToDegrees
+            val landedAt = landedPlanet!!.position
+            val landingAngleDegrees = atan2(ac.body.position.y - landedAt.y, ac.body.position.x - landedAt.x) * MathUtils.radiansToDegrees
             ac.controller.reanchor(landedAt, landingAngleDegrees)
+            ac.groundPlanet = landedPlanet
+            ac.driftResolved = false
+        } else {
+            ac.driftResolved = true
         }
-        ac.drifting = false
-        ac.driftResolved = true
     }
 
     /**
@@ -2348,6 +2599,16 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * [instant] skips straight to the old jump-cut behavior, used only for
      * the very first framing in init{} where there's nothing worth easing
      * from yet.
+     *
+     * **Sept 2026 session addendum 2:** Boo - the forced zoom change on
+     * every snap felt jarring on top of everything else about the handoff
+     * (see [awaitingTurnContinue]'s doc comment for the tap-to-continue
+     * half of this same feedback pass). The eased path no longer forces
+     * [AVATAR_SNAP_ZOOM] - it pans to [worldPosition] at whatever zoom the
+     * player already had (from their own pinch/pan, or wherever the last
+     * snap left it), full stop. [instant] still forces [AVATAR_SNAP_ZOOM] -
+     * it only ever runs once, for the very first framing in init{}, where
+     * there's no "current" zoom yet worth preserving.
      */
     private fun snapCameraToActiveAvatar(worldPosition: Vector2, instant: Boolean = false) {
         if (instant) {
@@ -2359,7 +2620,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         cameraEaseFromPosition.set(camera.position.x, camera.position.y)
         cameraEaseFromZoom = camera.zoom
         cameraEaseToPosition.set(worldPosition)
-        cameraEaseToZoom = AVATAR_SNAP_ZOOM
+        cameraEaseToZoom = camera.zoom
         cameraEaseElapsed = 0f
         cameraEaseActive = true
     }
@@ -2392,6 +2653,10 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // shared Vector2 instance, so nothing downstream needs to know it
         // can now mean a different character from one turn to the next.
         launchPoint.set(activePlayerCharacter().controller.position)
+        // Step D2 - see activePlayerPlanetCenter's own field doc comment:
+        // kept in sync with whichever player character currently has the
+        // turn's own home planet, same reasoning as launchPoint just above.
+        activePlayerPlanetCenter.set(activePlayerCharacter().groundPlanet.position)
         // Sept 2026 session - multi-character combat (Step 1): loops over
         // every living character on each side instead of assuming exactly
         // one. Defeated-but-not-yet-removed-this-frame characters are
@@ -2447,13 +2712,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         aiStrays.removeAll { !engineHasEntity(it) }
 
         // Sept 2026 session - orbital drift's trigger, generalized (Step 1)
-        // for multiple characters per side: the instant a side's SHARED
-        // home planet is destroyed, every one of that side's still-living
-        // characters that isn't already drifting/resolved starts drifting
-        // in the same frame (Boo, explicit: "characters can share a
-        // planet" - a shared planet dying should knock every character
-        // standing on it loose at once, not just whoever happens to be
-        // first in the list). driftResolved guards each character
+        // for multiple characters per side: the instant a character's OWN
+        // home planet is destroyed, it starts drifting, if it isn't already
+        // drifting/resolved. driftResolved guards each character
         // individually so a character that's already drifted and landed
         // once never re-triggers a second drift - see PlayerCharacterState/
         // AiCharacterState's doc comment for why this is a real, documented
@@ -2466,15 +2727,30 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // activateAiCharacter both need drifting already true (so they know
         // to freeze the drifting body) by the time they run - checking here
         // instead of after the block below is what guarantees that ordering.
+        //
+        // Step D2: used to check one SHARED home planet per side (Boo,
+        // explicit at the time: "characters can share a planet" - a shared
+        // planet dying should knock every character standing on it loose at
+        // once). Now checks each character's own [PlayerCharacterState
+        // .groundPlanet]/[AiCharacterState.groundPlanet] instead of a single
+        // side-wide field - the sharing behavior is preserved exactly for
+        // any character whose groundPlanet reference actually IS shared with
+        // a teammate (assignCharacterPlanets still cycles/shares when
+        // characterCount > planets.size), it's just no longer assumed to be
+        // every character's planet unconditionally. At the 20-win tier,
+        // where each of the player's 2 characters has its own separate
+        // planet, only the character whose own planet actually died starts
+        // drifting - its teammate on the other, still-intact planet stays
+        // put, which is the whole point of this step's generalization.
         for (pc in playerCharacters) {
             if (healthMapper.get(pc.entity).isDefeated) continue
-            if (!pc.drifting && !pc.driftResolved && gravitySourceMapper.get(launchPlanetEntity).isDestroyed) {
+            if (!pc.drifting && !pc.driftResolved && gravitySourceMapper.get(pc.groundPlanet.entity).isDestroyed) {
                 beginPlayerDrift(pc)
             }
         }
         for (ac in aiCharacters) {
             if (healthMapper.get(ac.entity).isDefeated) continue
-            if (!ac.drifting && !ac.driftResolved && gravitySourceMapper.get(targetPlanetEntity).isDestroyed) {
+            if (!ac.drifting && !ac.driftResolved && gravitySourceMapper.get(ac.groundPlanet.entity).isDestroyed) {
                 beginAiDrift(ac)
             }
         }
@@ -2536,6 +2812,21 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
                     activeShotSide?.let { addStray(it, entity) }
                     resolveActiveShot()
                 }
+            }
+        }
+
+        // Sept 2026 session - see awaitingTurnContinue's/continueToNextTurn's
+        // doc comments. The auto-advance half of the "tap to continue, or
+        // wait this long and it continues on its own" design - the tap half
+        // lives in ContinueTapInputProcessor. Ticks every frame the wait is
+        // actually active; a tap during the same window calls
+        // continueToNextTurn() directly and this stops ticking the instant
+        // awaitingTurnContinue goes false, so it never fires twice for one
+        // wait.
+        if (awaitingTurnContinue) {
+            turnContinuePauseElapsed += delta
+            if (turnContinuePauseElapsed >= TURN_CONTINUE_PAUSE_SECONDS) {
+                continueToNextTurn()
             }
         }
 
@@ -2618,6 +2909,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         renderOrbitalDriftDebugControls()
         renderMovementControls()
         renderStatsPanel()
+        renderContinuePrompt()
     }
 
     /**
@@ -2652,14 +2944,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Phase 18 - baseline sprite art for the star and the two planets,
-     * drawn in world space before [debugRenderer] so its wireframe
-     * outlines still overlay each sprite - lets on-device testing
-     * directly confirm each sprite lines up with its real Box2D fixture
-     * (same center, same diameter) rather than trusting it by eye alone.
-     * Deliberately doesn't touch the avatar, AI target, or missiles yet -
-     * those stay debug markers/wireframes for this pass, see
-     * PROJECT_STATE.md's Phase 18 entry for the narrow scope and why.
+     * Phase 18 - baseline sprite art for the star and every planet, drawn
+     * in world space before [debugRenderer] so its wireframe outlines still
+     * overlay each sprite - lets on-device testing directly confirm each
+     * sprite lines up with its real Box2D fixture (same center, same
+     * diameter) rather than trusting it by eye alone. Deliberately doesn't
+     * touch the avatar, AI target, or missiles yet - those stay debug
+     * markers/wireframes for this pass, see PROJECT_STATE.md's Phase 18
+     * entry for the narrow scope and why.
+     *
+     * **Step D2:** loops over [playerPlanets]/[aiPlanets] instead of
+     * exactly one launch/target pair - every planet on a side reuses that
+     * side's same texture (no per-planet art variation yet, see
+     * [Planet]'s own doc comment).
      */
     private fun renderCelestialSprites() {
         worldBatch.projectionMatrix = camera.combined
@@ -2679,13 +2976,17 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // only draws while it isn't isDestroyed; drawDamageOverlayIfDamaged
         // (which fades toward full opacity as damage approaches 100%) is
         // skipped too once destroyed - nothing left to overlay onto.
-        if (!gravitySourceMapper.get(launchPlanetEntity).isDestroyed) {
-            worldBatch.draw(planetLaunchTexture, launchPlanetPosition.x - PLANET_RADIUS, launchPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
-            drawDamageOverlayIfDamaged(launchPlanetEntity, launchPlanetPosition, planetDiameter)
+        for (planet in playerPlanets) {
+            if (!gravitySourceMapper.get(planet.entity).isDestroyed) {
+                worldBatch.draw(planetLaunchTexture, planet.position.x - PLANET_RADIUS, planet.position.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+                drawDamageOverlayIfDamaged(planet.entity, planet.position, planetDiameter)
+            }
         }
-        if (!gravitySourceMapper.get(targetPlanetEntity).isDestroyed) {
-            worldBatch.draw(planetTargetTexture, targetPlanetPosition.x - PLANET_RADIUS, targetPlanetPosition.y - PLANET_RADIUS, planetDiameter, planetDiameter)
-            drawDamageOverlayIfDamaged(targetPlanetEntity, targetPlanetPosition, planetDiameter)
+        for (planet in aiPlanets) {
+            if (!gravitySourceMapper.get(planet.entity).isDestroyed) {
+                worldBatch.draw(planetTargetTexture, planet.position.x - PLANET_RADIUS, planet.position.y - PLANET_RADIUS, planetDiameter, planetDiameter)
+                drawDamageOverlayIfDamaged(planet.entity, planet.position, planetDiameter)
+            }
         }
         worldBatch.end()
     }
@@ -2937,6 +3238,34 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val text = trackedBody?.let { "Missile Y: %.2f".format(it.position.y) } ?: ""
         val margin = HudFont.scaled(16f) // density-scaled, not a fixed pixel count - see HudFont
         HudFont.font.draw(hudBatch, text, margin, Gdx.graphics.height - margin)
+        hudBatch.end()
+    }
+
+    /**
+     * Sept 2026 session - see [awaitingTurnContinue]'s doc comment. Drawn
+     * centered, roughly a third of the way up the screen - clear of
+     * [renderMovementControls]' bottom-left buttons, the bottom-right
+     * debug-tool column, and [renderStatsPanel]'s top-right panel, so
+     * nothing else on screen is fighting for the same space. Only actually
+     * draws anything while [awaitingTurnContinue] is true; a no-op the rest
+     * of the time.
+     *
+     * **Revised (Sept 2026 session)** - Boo: the original static "Tap to
+     * continue" text didn't say how much time was actually left, which
+     * read as "too quick" once it auto-advanced. Now shows a live "Next
+     * turn in Ns" countdown instead, ceiling-rounded so it reads a clean
+     * 5, 4, 3, 2, 1 rather than jumping straight from "5" to "3" on an
+     * uneven frame - a tap still skips the wait immediately regardless of
+     * what the countdown currently reads.
+     */
+    private fun renderContinuePrompt() {
+        if (!awaitingTurnContinue) return
+        val secondsRemaining = ceil((TURN_CONTINUE_PAUSE_SECONDS - turnContinuePauseElapsed).coerceAtLeast(0f)).toInt()
+        val label = "Next turn in ${secondsRemaining}s"
+        hudCamera.update()
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        HudFont.font.draw(hudBatch, label, (Gdx.graphics.width - HudFont.widthOf(label)) / 2f, Gdx.graphics.height / 3f)
         hudBatch.end()
     }
 
@@ -3206,23 +3535,27 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         }
         // Ratio against GravitySourceComponent.initialMass (Phase 19c also
         // adds that property) rather than an arbitrary scale - see
-        // Components.kt.
-        val launchSource = gravitySourceMapper.get(launchPlanetEntity)
-        val launchRow = StatRow(
-            if (launchSource.isDestroyed) "Player Planet: DESTROYED" else "Player Planet Mass",
-            "%.1f".format(launchSource.mass), launchSource.mass / launchSource.initialMass, massBarColor
-        )
+        // Components.kt. Step D2: one row per planet (playerPlanets.mapIndexed),
+        // same "always numbered" convention playerRows/aiRows already use
+        // for characters, instead of the old single hardcoded launchRow -
+        // needed now that the 20-win tier gives the player 2 separate
+        // planets to show mass for, not just 1.
+        val launchRows = playerPlanets.mapIndexed { index, planet ->
+            val source = gravitySourceMapper.get(planet.entity)
+            val label = if (source.isDestroyed) "Player Planet ${index + 1}: DESTROYED" else "Player Planet ${index + 1} Mass"
+            StatRow(label, "%.1f".format(source.mass), source.mass / source.initialMass, massBarColor)
+        }
         val aiRows = aiCharacters.mapIndexed { index, ac ->
             val health = healthMapper.get(ac.entity)
             val label = if (health.isDefeated) "Target ${index + 1}: DEFEATED" else "Target ${index + 1} HP"
             StatRow(label, "%d/%d".format(health.currentHp, health.maxHp), health.currentHp.toFloat() / health.maxHp.toFloat(), aiBarColor)
         }
-        val targetSource = gravitySourceMapper.get(targetPlanetEntity)
-        val targetRow = StatRow(
-            if (targetSource.isDestroyed) "Target Planet: DESTROYED" else "Target Planet Mass",
-            "%.1f".format(targetSource.mass), targetSource.mass / targetSource.initialMass, massBarColor
-        )
-        val statRows = playerRows + launchRow + aiRows + targetRow
+        val targetRows = aiPlanets.mapIndexed { index, planet ->
+            val source = gravitySourceMapper.get(planet.entity)
+            val label = if (source.isDestroyed) "Target Planet ${index + 1}: DESTROYED" else "Target Planet ${index + 1} Mass"
+            StatRow(label, "%.1f".format(source.mass), source.mass / source.initialMass, massBarColor)
+        }
+        val statRows = playerRows + launchRows + aiRows + targetRows
 
         val contentWidth = maxOf(
             minContentWidth,

@@ -3473,16 +3473,12 @@ follow-on to A/B/C, and can't be zero-visible-change the way those were):**
 **Planned build order** (split into two deliveries rather than one large
 one, given the risk above):
 - **Step D1 - built, see its own entry immediately below.**
-- **Step D2 (next up):** the actual N-planet/character generalization -
-  entity creation (replacing the two hardcoded `launchPlanetEntity`/
-  `targetPlanetEntity` fields with real lists sized per the tier),
-  `renderCelestialSprites`/damage-overlay/HUD mass-row generalization
-  (loop over `playerPlanets`/`aiPlanets`, per-planet radius for size
-  variation), the new AI 3rd collision category, and the
-  `SlingshotInputProcessor` planetCenter/planetRadius fix above (needed
-  together with the entity generalization - D2 wiring in a real 2nd player
-  planet without this fix would leave aiming subtly wrong at the 20-win
-  tier, so these ship as one delivery, not split further).
+- **Step D2 - built, see its own entry further below.** Per-planet size
+  variation ended up deliberately narrowed out of this step's actual
+  scope during design (kept every planet on a side geometrically
+  identical, `SlingshotInputProcessor`'s `planetRadius` stayed a fixed
+  `Float` rather than becoming a lambda) - see that entry's own notes for
+  why, and what's left for whenever size variation is picked up.
 
 #### Phase 33, Step D1: campaign tier lookup + dynamic field size + win-count debug control - ✅ DONE, built (Sept 2026 session)
 
@@ -3577,6 +3573,186 @@ this step so it doesn't read as something broke.
    whichever field size you land on - nothing about turn structure,
    aiming, or combat should feel different, only the field's overall
    scale and the star's position within it.
+
+#### Phase 33, Step D2: real N-planet/character generalization - ✅ DONE, built (Sept 2026 session)
+
+The second of the two Step D deliveries above - the actual "more planets/
+characters really appear at higher win counts" work. Confirmed scope going
+in per the risk assessment: entity/body construction for real N-sized
+`playerPlanets`/`aiPlanets`, every remaining call site that still read a
+fixed `launchPlanet*`/`targetPlanet*` singular field, the new AI 3rd
+collision category, and the `SlingshotInputProcessor` planetCenter fix -
+all shipped together as one delivery, per the risk assessment's own call
+that splitting them further would leave aiming subtly wrong at the 20-win
+tier in between.
+
+**A pleasant surprise going in:** Steps A/B/C (earlier "Planet/character
+scaling" work, well before this campaign-tier design existed) had already
+generalized the *hard* parts - obstacle avoidance
+(`currentCelestialObstacles`), planet-sharing/round-robin assignment
+(`assignCharacterPlanets`), and within-a-shared-planet start-angle
+placement (`assignCharacterStartAngles`) all already read
+`playerPlanets`/`aiPlanets` as real lists, not a fixed-index pair. Step
+D2's actual work turned out to be: build those two lists for real (they'd
+only ever held exactly 1 `Planet` each, wrapping the old singular fields),
+and fix the handful of remaining spots - rendering, drift, the stats
+panel, the debug wireframe filter, camera framing - that still bypassed
+those lists and read `launchPlanetEntity`/`targetPlanetPosition`/etc.
+directly. Much smaller than the risk assessment feared, precisely because
+of that earlier groundwork.
+
+**What's built, all in `PlayScreen.kt` unless noted:**
+- **`Planet` gained a `body: Body` field** (alongside its existing
+  `entity`/`position`/`radius`) - needed so the debug wireframe filter and
+  the drift-landing check can identify/locate any planet generically, now
+  that there's no fixed `launchPlanetBody`/`targetPlanetBody` pair to fall
+  back on.
+- **`playerCharacterCount`/`aiCharacterCount`** (new instance `val`s, right
+  after Step D1's `campaignTier` block) replace the old fixed
+  `CHARACTERS_PER_SIDE = 2` constant - just `campaignTier.playerPlanetCount`/
+  `aiPlanetCount` directly, since every tier on today's ladder gives each
+  character its own dedicated home planet (no tier actually shares one
+  planet across characters, though `assignCharacterPlanets`' round-robin-
+  sharing behavior is still real, working machinery underneath, kept for
+  whenever a future tier needs it).
+- **Real per-planet construction** - `playerPlanets`/`aiPlanets` are now
+  built via `.map` over `playerPlanetPositions`/`aiPlanetPositions` (new
+  fields, filled by `randomizePlanetPositions` - see below), each with its
+  own Box2D body/Ashley entity/`GravitySourceComponent`, replacing the old
+  two-singular-planets-then-wrap-in-a-size-1-list code. Every planet on a
+  side gets that side's same fixed mass constant and the same reused
+  texture - **no per-planet size or mass variation yet** (the confirmed
+  "same image, vary sizes" design is real but deliberately deferred to a
+  separate later polish pass, not part of this step's scope - keeping
+  every planet on a side geometrically identical for now was a deliberate
+  risk-reduction call, since it meant `SlingshotInputProcessor`/
+  `AiTurnController`/`AvatarMovementController` could all keep using the
+  fixed `PLANET_RADIUS` constant unchanged instead of also becoming
+  per-planet this same step).
+- **`randomizePlanetPositions()`/`planetLayoutIsClear()` generalized** to
+  N positions - `generateScatteredPositions(campaignTier.playerPlanetCount
+  + campaignTier.aiPlanetCount)`, split into the player/AI position lists.
+  The old planet-to-planet separation re-check is gone (redundant -
+  `generateScatteredPositions` already guarantees it for every pair it
+  places, regardless of side); the star/flight-path clearance check now
+  covers every player-planet/AI-planet pairing (up to 2×3 = 6 at the
+  20-win tier), not just one fixed pair.
+- **Each character now tracks its own `homePlanet: Planet`**
+  (`PlayerCharacterState`/`AiCharacterState` both gained this field, set
+  from `assignCharacterPlanets`' output at construction). This is what let
+  the drift trigger, `beginPlayerDrift`/`beginAiDrift`, and
+  `resolveDriftLanding` all generalize cleanly - see the real behavior
+  change below.
+- **New AI 3rd collision category** (`CATEGORY_AI_TARGET_3`) plus
+  `PLAYER_AVATAR_CATEGORIES`/`AI_TARGET_CATEGORIES` array lookups
+  replacing the old `if (i == 0) X else X_2` ternaries, which didn't scale
+  past 2. The player side still only ever needs 2 categories on today's
+  ladder.
+- **`SlingshotInputProcessor`'s `planetCenter` fix** - new
+  `activePlayerPlanetCenter: Vector2` field, live-mutated every frame
+  (same pattern `launchPoint` already used) to whichever player character
+  currently has the turn's own home planet, passed into
+  `SlingshotInputProcessor` instead of the old fixed
+  `launchPlanetPosition`. `planetRadius` stayed a fixed `Float` rather than
+  becoming a lambda as originally guessed in the risk assessment - safe to
+  simplify since every planet shares `PLANET_RADIUS` this step (no size
+  variation yet, see above); revisit if/when size variation actually ships.
+- **Rendering/HUD generalized to loop over `playerPlanets`/`aiPlanets`**:
+  `renderCelestialSprites` (each planet drawn/damage-overlaid
+  independently instead of exactly 2 named draws) and `renderStatsPanel`'s
+  planet mass rows (now `launchRows`/`targetRows`, one per planet,
+  numbered "Player Planet 1 Mass"/"Player Planet 2 Mass" etc. - matches
+  the "always numbered" convention the character HP rows already used,
+  even at today's 1-planet-per-side tiers, a small deliberate label change
+  from the old unnumbered "Player Planet Mass" for consistency).
+  `debugRenderer`'s wireframe-hiding override now checks
+  `playerPlanets`/`aiPlanets` by reference instead of the old fixed
+  `launchPlanetBody`/`targetPlanetBody` pair.
+
+**A real behavior change, not just plumbing** - worth flagging clearly
+before on-device testing: the orbital-drift trigger (in `render()`) used to
+check one SHARED home planet per side, so destroying either side's one
+planet knocked every character on that side into drift at once. Now that
+each character tracks its own `homePlanet`, at the 20-win tier (2 separate
+player planets, 1 character each) **destroying one of the player's planets
+only sets THAT planet's character drifting - the other player character,
+on their own still-intact planet, stays put and keeps fighting normally.**
+This is the whole point of the generalization, not a bug, but it's a
+genuinely different feel from every earlier tier (where the two characters
+per side always shared one planet and always drifted together) - worth
+Boo's explicit attention during on-device testing at that tier specifically.
+
+**A judgment call, not confirmed with Boo, flagged for on-device
+feedback:** `beginPlayerOrderPick()` (the "tap a character to go first"
+picker, shown whenever 2+ player characters are alive) used to reframe the
+camera on "the" shared planet - with 2 SEPARATE player planets at the
+20-win tier, there's no longer one single planet to frame on. It now
+reframes on the midpoint between every living player planet, at the same
+existing `AVATAR_SNAP_ZOOM`. This is a reasonable first cut, not a
+confirmed design - `AVATAR_SNAP_ZOOM` may turn out too tight to show both
+planets clearly enough to tap between them; a real zoom-to-fit would be
+the natural fix if that's what on-device testing at the 20-win tier shows.
+
+**Not built this step (by design - separate later work, not part of this
+step's confirmed scope):**
+- **Per-planet size/mass variation** - the confirmed "same image, vary
+  sizes" design. Every planet on a side is still geometrically/physically
+  identical this step (see above) - a deliberate scope-narrowing call made
+  during this step's own design pass (not previously confirmed with Boo as
+  a separate step), to keep this already-large delivery lower-risk. Needs
+  its own pass through `SlingshotInputProcessor`/`AiTurnController`/
+  `AvatarMovementController` (all currently still read the fixed
+  `PLANET_RADIUS` constant, not `Planet.radius`) plus texture/draw-size
+  changes once picked up.
+- The two still-open orbital-drift bugs from the earlier drift-speed-fix
+  session (overlap bug, freeze-timing bug) - untouched by this step,
+  still open, see that section above.
+
+#### How to test Step D2 on-device
+
+1. Baseline check (same as Step D1's own step 1): a fresh game at under 5
+   total wins should look and play exactly as before - 1 planet/character
+   each side, nothing visibly different from pre-D2.
+2. Use the win-count debug control ("+1"/"R", bottom-right, from Step D1)
+   to cross 5 wins, then start a NEW game (tier is read once at
+   construction, same as Step D1). Confirm the AI now has 2 characters on
+   its own single (bigger) planet, while the player still has just 1 -
+   matches the "5-19 wins" tier. Check the stats panel shows 2 "Target N
+   HP" rows and 1 numbered "Target Planet 1 Mass" row.
+3. Cross 20 wins, start another new game. Confirm the AI now has 3
+   characters (still all on one AI planet), and the player now has 2
+   characters **each on their own separate planet** - this is the tier
+   where the behavior actually gets structurally new. Check:
+   - The stats panel shows 2 "Player Planet N Mass" rows now, not 1.
+   - The player's own turn-order picker (tap either character to go first,
+     each round) reframes the camera somewhere that shows both of the
+     player's planets - flag if `AVATAR_SNAP_ZOOM` feels too tight to
+     comfortably tap between them (see the judgment call above).
+   - Destroy ONE of the player's two planets (aim at it directly) and
+     confirm only the character standing on that specific planet starts
+     drifting - the other player character, on their still-intact planet,
+     should keep standing/aiming normally, not drift. This is the main
+     new behavior this step adds - see "A real behavior change" above.
+   - Confirm a drifting character can still land on ANY surviving planet
+     (not just its own former one) if its orbit happens to carry it there,
+     and that flying into the star still ends that character the same way
+     it always has.
+4. Cross 30 wins, confirm the field/planet counts match the 20-29 tier
+   exactly (no further growth) and nothing looks broken at
+   `isCampaignComplete = true`.
+5. Regression check across every tier tested above: normal aiming/firing
+   still works for every character (including the horizon-restriction
+   "can't fire into your own planet" rule - watch this specifically for
+   the player's 2nd character at the 20-win tier, since
+   `activePlayerPlanetCenter` is the part of this step most directly
+   responsible for keeping that check correct per-character), collision/
+   friendly-fire behavior is unchanged, and a full game still ends
+   correctly (GameOverScreen, win or loss) at every tier.
+6. Tap "R" to reset win count back toward 0 and confirm a fresh game
+   returns cleanly to the 1-planet/1-character baseline - same
+   round-trip check Step D1's own test script already covered, worth
+   reconfirming now that real entities are actually being built/torn down
+   per tier instead of just the field size changing.
 
 ## Phase 24: pinch-zoom/pan camera + snap-to-active-avatar
 
@@ -4924,6 +5100,193 @@ before building this step, unlike Steps 1 and 2.
 4. General regression check: nothing about turn order, the Step 2 order
    picker, or HUD should have changed this step - confirm those all still
    behave exactly as Phase 31 described.
+
+## Phase 34: turn-handoff pacing (tap-to-continue-or-auto-advance) + camera snap keeps player's zoom - ✅ DONE, built (Sept 2026 session)
+
+Boo's own feedback, unprompted: the automatic turn-handoff (camera snap +
+control switch) fired the instant a shot resolved, which read as "clumsy"
+especially as the field got bigger via Step D2's campaign tiers - it could
+yank the camera away while Boo was still watching a shot fly or looking
+around, and the forced zoom change on top of that felt jarring in its own
+right.
+
+**Design discussion, not guessed at:** talked through three candidate
+fixes for the timing (a fixed pause, requiring a tap to continue, or only
+waiting while the camera was actively mid-gesture). Boo picked "tap to
+continue" outright at first, then caught himself before it was built -
+"the tapping to continue after each and every shot will get tedious" -
+since it would mean a tap after literally every shot, both sides, every
+character. Landed on a hybrid instead: **an automatic pause that continues
+on its own if nothing is tapped, but a tap skips the wait immediately** -
+never a mandatory tap, but never cut off early either. Boo picked ~2.5-3s
+for the pause length (2.5s shipped, not yet tuned live on-device). For the
+zoom question, Boo picked "keep your current zoom, just pan" outright -
+stop forcing a fixed zoom level on every snap.
+
+**What's built, all in `PlayScreen.kt`:**
+- **`awaitingTurnContinue`/`turnContinuePauseElapsed`** (new fields) -
+  `resolveActiveShot()` no longer invokes `pendingTurnHandoff` directly;
+  it just starts this wait (if a real handoff is actually pending).
+  `continueToNextTurn()` (new function) is the only thing that actually
+  invokes `pendingTurnHandoff` now, called either by a tap or by render()'s
+  own per-frame check once `turnContinuePauseElapsed` reaches
+  `TURN_CONTINUE_PAUSE_SECONDS` (2.5s).
+- **`ContinueTapInputProcessor`** (new inner class, same pattern as
+  `BackKeyHandler`) - lives in `restrictedInputProcessor` (already the
+  active multiplexer for this whole "shot in flight, then waiting on
+  handoff" window, for both sides), registered LAST so an existing debug
+  button still gets first dibs on a tap that lands on it instead of also
+  continuing the turn. A tap anywhere else while waiting calls
+  `continueToNextTurn()` immediately; a no-op otherwise.
+- **`renderContinuePrompt()`** (new function) - draws a plain "Tap to
+  continue" text label, centered, about a third of the way up the screen
+  (clear of the movement buttons, debug-tool column, and stats panel),
+  only while `awaitingTurnContinue` is true.
+- **This gates EVERY automatic handoff, not just after Boo's own shots** -
+  between each of the AI's characters when it has more than one, and
+  between the AI's turn ending and the player's beginning, same as after
+  the player's own shot. Deliberate, matches what was actually discussed.
+- **`snapCameraToActiveAvatar`'s eased path no longer forces
+  `AVATAR_SNAP_ZOOM`** - `cameraEaseToZoom` is now set to whatever
+  `camera.zoom` already is at the moment the snap starts, so the eased pan
+  keeps the player's own zoom level instead of overriding it. The `instant`
+  path (used exactly once, for the very first camera framing in `init{}`)
+  still forces `AVATAR_SNAP_ZOOM` - there's no "current" zoom worth
+  preserving before the very first frame.
+
+**Explicitly NOT touched, by Boo's own scoping in the design discussion:**
+- The win/loss screen (`GameOverScreen`) still appears immediately the
+  instant the last character on a side is defeated - not gated behind a
+  tap or the pause.
+
+### Revision: 5s live countdown, not a static prompt (Sept 2026 session, same session)
+
+On-device feedback after the initial build: "the tap to continue is ok but
+it is too quick. what I am thinking is that instead of that, it comes up
+with a message towards the bottom that... is counting down from 5 sec
+something like 'Next turn in x sec'." Adopted essentially as proposed - it
+directly fixes the actual complaint (the static prompt didn't say how much
+time was left, which read as "too quick" once the pause ran out) - and
+kept the existing tap-to-skip behavior alongside it, since nothing asked
+for that to go and it's a strict improvement with no added cost.
+
+- **`TURN_CONTINUE_PAUSE_SECONDS` bumped from 2.5f to 5f.** Still a plain
+  constant, not a live-tunable slider - a natural candidate for its own
+  debug slider later if 5s turns out wrong in practice too.
+- **`renderContinuePrompt()` rewritten** - instead of static "Tap to
+  continue" text, now shows a live `"Next turn in ${n}s"` label, `n`
+  computed as `ceil(TURN_CONTINUE_PAUSE_SECONDS - turnContinuePauseElapsed)`
+  (coerced to never go below 0) so it counts down cleanly through whole
+  seconds (5, 4, 3, 2, 1) instead of jumping or showing a fraction. A tap
+  still skips the wait immediately regardless of what the countdown
+  currently reads.
+
+## Bug fixes found via Phase 34 on-device testing (Sept 2026 session)
+
+Two bugs Boo found while testing Phase 34 (both from the same on-device
+session, reported with screenshots). Neither is caused by Phase 34 itself
+- both are older orbital-drift/drift-landing issues that Step D2's
+N-planet-per-side generalization made reachable in practice, surfaced now
+because that on-device session happened to hit them.
+
+### Bug 1: player sprite stranded in space after drifting onto (then losing) a second planet
+
+Boo, on-device: "the blue circle is the player sprite staying on planet
+after planet has go[ne] away. in this scenario, the sprite[']s original
+planet was destroyed and it ended up drifting to an enemy pl[a]net along
+side an enemy sprite. eventually that planet got destroyed and the enemy
+went right into the sun but the player sprite remained."
+
+**Root cause:** `PlayerCharacterState`/`AiCharacterState` each held an
+immutable (`val`) `homePlanet: Planet`, set once at construction. The
+drift-trigger check in `render()` only ever watches whether *that specific
+planet* is destroyed. Before Step D2 (one planet per side) this was fine -
+there was nothing else a character could ever be standing on. Once Step D2
+let a drifting character land on a *different, still-intact* planet
+(including an enemy's), `homePlanet` never updated to reflect the new
+ground, and `driftResolved` had already latched permanently `true` from
+the first landing (by original design, to stop a landed character from
+re-triggering off its own now-moot original planet). So when that second
+planet was later destroyed too, nothing was watching it, and the character
+was left stranded - visually still standing on empty space. Confirmed this
+exact gap was already called out in this class's own doc comment from the
+Step D2 era as "a real limitation... not an oversight" - Step D2 knowingly
+left it, and this round is what actually closes it.
+
+**Fix, all in `PlayScreen.kt`:**
+- `homePlanet` renamed to `groundPlanet` throughout the file (plain
+  rename, `sed`, 15 occurrences - the old name undersold what it now
+  does), and changed from `val` to `var` on both `PlayerCharacterState`
+  and `AiCharacterState`.
+- `resolveDriftLanding`'s return type changed from
+  `Pair<DriftLandingOutcome, Vector2?>` to
+  `Pair<DriftLandingOutcome, Planet?>` - callers need the whole landed-on
+  `Planet` object now, not just its position, so they can re-ground the
+  character on it.
+- `checkPlayerDriftLanding`/`checkAiDriftLanding` now set
+  `pc.groundPlanet`/`ac.groundPlanet` to whatever `Planet` was actually
+  landed on, and clear `driftResolved = false` again on every successful
+  (non-fatal) landing - so if *that* planet gets destroyed too, the
+  character can drift a second (or third) time instead of being
+  permanently un-watched after the first landing.
+
+### Bug 2: defeated-by-the-sun sprite's wireframe outline keeps orbiting forever
+
+Boo, on-device: "when an enemy falls into the sun, the red part of the
+sprite disappears but the green cir[c]le outline remains and constantly
+rolls around the sun."
+
+**Root cause, two parts:**
+1. `resolveDriftLanding`'s HIT_STAR branch only ever dealt lethal damage
+   (`health.applyDamage(health.maxHp)`) - it never touched the Box2D body
+   itself. The body stayed `DynamicBody` and kept being simulated (still
+   affected by gravity), even though the character was defeated. The
+   sprite draw is correctly gated on `isDefeated` so it vanished, but the
+   physics body kept orbiting the star underneath.
+2. `debugRenderer`'s `Box2DDebugRenderer.renderBody` override (the
+   wireframe/debug-outline pass) already had a special case to hide the
+   star's and every planet's body, but never had one for a defeated
+   character's body - so the still-simulating, sprite-less body kept
+   drawing its green wireframe dot, which is exactly the "outline...
+   constantly rolls around the sun" Boo saw.
+
+**Fix, both in `PlayScreen.kt`:**
+- `resolveDriftLanding`'s HIT_STAR branch now freezes the body the same
+  way the LANDED outcome already did: `body.type = KinematicBody`,
+  `body.linearVelocity = Vector2.Zero`, and removes
+  `GravityAffectedComponent` - so it actually stops moving, not just stops
+  taking damage.
+- `debugRenderer`'s `renderBody` override extended to also skip any
+  player/AI character body whose entity is `isDefeated`, so no leftover
+  wireframe dot draws at all. This incidentally also fixes the same
+  latent issue for a character defeated by lethal *landing* damage
+  (undiscovered before now, same symptom, same fix covers it).
+
+#### How to test this round on-device
+
+1. Fire a shot and watch the post-shot prompt: it should read
+   "Next turn in 5s" and count down live (5, 4, 3, 2, 1) rather than
+   showing static "Tap to continue" text.
+2. Do nothing and let it run out - the handoff should fire right as the
+   countdown reaches 0, roughly 5 seconds after the shot resolved (up from
+   2.5s before this revision).
+3. Tap anywhere (not a debug button) mid-countdown - the handoff should
+   still fire immediately, same as before, regardless of what number the
+   countdown currently shows.
+4. Bug 1 repro: get a character drifting off its own destroyed planet so
+   it lands on a *different* (enemy or own-side) still-intact planet, then
+   destroy that second planet too - the character should drift again
+   (visually), not remain frozen standing on empty space.
+5. Bug 2 repro: get a character (either side) to drift into the sun and
+   get defeated that way - confirm nothing at all is left drawing at the
+   sun afterward: no sprite (already worked) AND no wireframe outline
+   orbiting it (the actual fix this round).
+6. Regression check: a character defeated by ordinary combat damage (not
+   drift-related) should look exactly as before - sprite and any debug
+   wireframe both disappear immediately, no lingering outline.
+7. Regression check: a character that drifts and lands successfully
+   (not into the sun) should behave exactly as before - reanchors, can
+   fire from its new spot, no wireframe or stranding issues.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
