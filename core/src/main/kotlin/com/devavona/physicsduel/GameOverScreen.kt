@@ -8,8 +8,7 @@ import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.g2d.SpriteBatch
 
 /**
- * Game-over screen: solid color, VICTORY/DEFEAT + prompt text, tap
- * anywhere to start a fresh run.
+ * Game-over screen: solid color, VICTORY/DEFEAT + prompt text.
  *
  * Phase 22 - now a real outcome screen, not just a stand-in. Reached two
  * ways: [PlayScreen] itself, the moment either character's
@@ -17,6 +16,19 @@ import com.badlogic.gdx.graphics.g2d.SpriteBatch
  * which side won); and [PauseScreen]'s "end run" tap zone, a manual quit
  * that isn't really a win or loss - passes `won = false`, same visual
  * treatment as an actual defeat since there's no neutral third state built.
+ *
+ * **Left/right split added (Sept 2026 session):** Boo, on-device - "there
+ * is no way to get back to the start screen from within the game... I
+ * have to kill the app completely and relaunch to get to the start
+ * screen." This was the actual dead end - [PauseScreen]'s "end run" always
+ * routed here, and this screen's only prior action was "tap anywhere ->
+ * new game," so reaching [MenuScreen] (and from there, [UpgradesScreen])
+ * required either winning/losing into a fresh game first or a cold
+ * restart. Same left/right split convention [PauseScreen] already uses,
+ * NOT the same mapping - explicitly confirmed with Boo this isn't a
+ * Resume/End Run split, just New Game / Menu. The win/loss background
+ * color is left untouched (still meaningful signal) - only the single
+ * former prompt line became two half-width labels.
  */
 class GameOverScreen(private val game: PhysicsDuelGame, private val won: Boolean) : InputAdapter(), Screen {
 
@@ -53,17 +65,29 @@ class GameOverScreen(private val game: PhysicsDuelGame, private val won: Boolean
         batch.begin()
         val title = if (won) "VICTORY" else "DEFEAT"
         font.draw(batch, title, (width - HudFont.widthOf(title)) / 2f, height * 0.56f)
-        val prompt = "Tap for New Game"
-        font.draw(batch, prompt, (width - HudFont.widthOf(prompt)) / 2f, height * 0.44f)
+
+        // Sept 2026 session - was a single centered "Tap for New Game" line;
+        // see this class's own doc comment for why it's now a left/right
+        // split instead.
+        val newGameLabel = "New Game"
+        font.draw(batch, newGameLabel, (width / 2f - HudFont.widthOf(newGameLabel)) / 2f, height * 0.44f)
+        val menuLabel = "Menu"
+        font.draw(batch, menuLabel, width / 2f + (width / 2f - HudFont.widthOf(menuLabel)) / 2f, height * 0.44f)
         batch.end()
     }
 
     override fun touchDown(screenX: Int, screenY: Int, pointer: Int, button: Int): Boolean {
         AudioManager.playTap()
-        // Phase 22 - straight into a fresh run (same "brand new instance"
-        // pattern MenuScreen's own tap-to-play uses), not back to the menu
-        // first - "New Game" means a new game.
-        game.setScreen(PlayScreen(game))
+        if (screenX < Gdx.graphics.width / 2) {
+            // Phase 22 - straight into a fresh run (same "brand new instance"
+            // pattern MenuScreen's own tap-to-play uses), not back to the menu
+            // first - "New Game" means a new game.
+            game.setScreen(PlayScreen(game))
+        } else {
+            // Sept 2026 session - the actual fix for the "stuck, have to kill
+            // the app" complaint - see this class's own doc comment.
+            game.setScreen(MenuScreen(game))
+        }
         return true
     }
 

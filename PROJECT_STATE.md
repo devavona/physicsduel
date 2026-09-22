@@ -5497,6 +5497,46 @@ numbers.
 8. Regression check: tapping anywhere else on the menu (i.e. NOT that
    corner) still starts a fresh game immediately, exactly as before.
 
+## Bug fix: no route back to the menu without a cold app restart (Sept 2026 session)
+
+Boo, on-device, right after Step 2 landed (and directly blocking reaching
+the new Upgrades screen mid-session): "there is no way to get back to the
+start screen from within the game. only options are to end run or resume.
+if you hit end run, there is a defeat screen with only option being to
+tap for a new game. I have to kill the app completely and relaunch to get
+to the start screen."
+
+**Root cause:** `PauseScreen`'s "end run" always routed to
+`GameOverScreen`, and that screen's only action was "tap anywhere -> new
+game" - there was never a path from there back to `MenuScreen` short of a
+cold restart.
+
+**Fix, `GameOverScreen.kt` only:** left/right split, same convention
+`PauseScreen` already uses (explicitly confirmed with Boo this is NOT the
+same Resume/End Run mapping - just New Game / Menu, and confirmed these
+are plain placeholder text labels, not a real button-art pass). Left half
+keeps the existing "tap for new game" behavior; right half is new -
+`game.setScreen(MenuScreen(game))`. The win/loss background color (green/
+win, red/loss) is untouched - still meaningful, only the single former
+"Tap for New Game" line became two half-width labels. `PauseScreen` itself
+wasn't touched - fixing the dead end at `GameOverScreen` closes the loop
+completely, since Pause's "end run" already routes there.
+
+#### How to test this fix on-device
+
+1. Start a game, pause, tap "end run" - confirm you land on the (now
+   red-background) defeat screen same as before.
+2. Tap the LEFT half - confirms unchanged behavior, starts a brand new
+   game immediately.
+3. Repeat, but this time tap the RIGHT half - confirms it returns to the
+   actual start/menu screen (Wins/Gravitons/Runs counters visible, "Tap
+   to Play" prompt) instead of forcing a new game.
+4. From the menu reached that way, confirm the "Upgrades >" corner still
+   works - this was the actual blocker Boo hit.
+5. Repeat both taps after a REAL win/loss (not just a manual "end run")
+   to confirm the split works identically regardless of how the outcome
+   screen was reached.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
