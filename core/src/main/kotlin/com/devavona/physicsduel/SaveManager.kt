@@ -37,6 +37,28 @@ object SaveManager {
 
     private const val TAG = "SaveManager"
 
+    // Gravitons economy, Step 1 - see [awardGravitons]'s doc comment for why
+    // these are separate from win/loss handling and why the numbers
+    // themselves are just a starting guess.
+    private const val GRAVITONS_PER_WIN = 10
+    private const val GRAVITONS_PER_LOSS = 3
+
+    // Gravitons economy, Step 2 - see [purchaseHpUpgrade]'s doc comment.
+    // HP_UPGRADE_COSTS[i] is the Gravitons cost of the (i+1)-th purchase -
+    // an increasing curve on purpose, so the early, cheap levels help most
+    // with the "2v1 feels too hard" complaint that started this whole
+    // economy, while the later, expensive ones are a longer grind that
+    // roughly tracks reaching the campaign ladder's higher tiers. First-
+    // guess numbers, not derived from anything - same tune-on-device
+    // treatment as GRAVITONS_PER_WIN/GRAVITONS_PER_LOSS above.
+    private val HP_UPGRADE_COSTS = intArrayOf(15, 30, 50, 75, 105)
+
+    /** How much Max HP each purchased level adds - see [hpUpgradeBonus]. */
+    const val HP_PER_UPGRADE_LEVEL = 10
+
+    /** The fixed ceiling on [purchaseHpUpgrade] - see that function's doc comment for why this is capped at all. */
+    val MAX_HP_UPGRADE_LEVEL = HP_UPGRADE_COSTS.size
+
     private val json = Json()
     private val saveFile: FileHandle = Gdx.files.local("save.json")
     private val backupFile: FileHandle = Gdx.files.local("save.json.bak")
@@ -54,6 +76,21 @@ object SaveManager {
 
     /** Current win count, loading from disk on first access - see [recordWin]. */
     fun currentWinCount(): Int = current.winCount
+
+    /** Current Gravitons balance, loading from disk on first access - see [awardGravitons]. */
+    fun currentGravitons(): Int = current.gravitons
+
+    /** Current Max HP upgrade level (0..[MAX_HP_UPGRADE_LEVEL]), loading from disk on first access. */
+    fun currentHpUpgradeLevel(): Int = current.hpUpgradeLevel
+
+    /** How much the Max HP upgrade currently adds - see [PlayScreen]'s playerCharacters construction, which reads this. */
+    fun hpUpgradeBonus(): Int = current.hpUpgradeLevel * HP_PER_UPGRADE_LEVEL
+
+    /** Gravitons cost of the NEXT purchase, or null if already at [MAX_HP_UPGRADE_LEVEL] - [UpgradesScreen] reads this to render the buy button. */
+    fun nextHpUpgradeCost(): Int? {
+        val level = current.hpUpgradeLevel
+        return if (level >= MAX_HP_UPGRADE_LEVEL) null else HP_UPGRADE_COSTS[level]
+    }
 
     /** Call when a run genuinely ends (not on pause) - see [PauseScreen]. */
     fun recordRunEnded() {
@@ -83,6 +120,50 @@ object SaveManager {
     fun resetWinCount() {
         current.winCount = 0
         persistTo(current, tmpFile, saveFile, backupFile)
+    }
+
+    // Sept 2026 session - Gravitons economy, Step 1 (see PROJECT_STATE.md's
+    // "Bug fixes found via Phase 34 on-device testing"-adjacent design
+    // discussion: Boo wants a persistent currency that rewards perseverance,
+    // not just wins - "get a little more experience every time you lose,
+    // and then you can buy new weapons, or more health, or health
+    // regeneration"). Deliberately separate from [recordWin] - called from
+    // BOTH of PlayScreen's win and loss branches (recordWin only fires on a
+    // win), since the whole point is that a loss still moves you forward,
+    // just by less. GRAVITONS_PER_WIN/GRAVITONS_PER_LOSS are first-guess
+    // numbers, not derived from anything - same "ship a guess, tune it once
+    // it's actually been played" treatment as every other feel constant in
+    // this project (TURN_CONTINUE_PAUSE_SECONDS, ShotSpeedTuning's default,
+    // etc.). Nothing spends Gravitons yet - that's Step 2.
+    fun awardGravitons(won: Boolean) {
+        current.gravitons += if (won) GRAVITONS_PER_WIN else GRAVITONS_PER_LOSS
+        persistTo(current, tmpFile, saveFile, backupFile)
+    }
+
+    // Gravitons economy, Step 2 (Sept 2026 session) - the first real spend.
+    // See PROJECT_STATE.md's "Gravitons economy" entry for the full design
+    // discussion. Deliberately capped at MAX_HP_UPGRADE_LEVEL rather than
+    // stacking forever (Boo's explicit call, tying back to the "never
+    // overmatched" goal the whole economy exists to serve) - an unbounded
+    // Max HP climb would eventually make the player's side trivially
+    // durable against AI stats that never grow past whatever the campaign
+    // ladder tier fixes them at.
+    /**
+     * Attempts to buy the next Max HP level. Returns true if the purchase
+     * succeeded (enough Gravitons banked, not already maxed) and false
+     * otherwise - in the false case nothing changed and nothing was
+     * persisted. [UpgradesScreen] is the only caller; it doesn't currently
+     * react differently to true vs false, since the very next frame's
+     * redraw already reflects whatever actually happened (balance/level
+     * unchanged on a failed attempt, both updated on success).
+     */
+    fun purchaseHpUpgrade(): Boolean {
+        val cost = nextHpUpgradeCost() ?: return false
+        if (current.gravitons < cost) return false
+        current.gravitons -= cost
+        current.hpUpgradeLevel += 1
+        persistTo(current, tmpFile, saveFile, backupFile)
+        return true
     }
 
     /** Call once per cold start, not on every screen change - see [PhysicsDuelGame.create]. */

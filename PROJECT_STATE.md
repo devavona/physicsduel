@@ -5288,6 +5288,215 @@ rolls around the sun."
    (not into the sun) should behave exactly as before - reanchors, can
    fire from its new spot, no wireframe or stranding issues.
 
+## Gravitons economy - design discussion + Step 1 (Sept 2026 session)
+
+Grew directly out of on-device feedback on the campaign ladder: "its too
+hard when its 2 v 1" (the 5-win tier, where the AI gets a 2nd character/
+planet before the player does - see "Campaign progression ladder" above,
+"a deliberate asymmetric difficulty step"). Talked through fix directions
+(soften the AI, buff the player, remove the asymmetric step, or don't
+guess and discuss tradeoffs) - Boo widened the conversation instead:
+wants a persistent in-game economy so losses still feel like forward
+progress, explicitly citing the "typical video game" pattern of earning
+currency (more on a win, some on a loss) to spend on upgrades, and wants
+neither side to ever feel too overmatched.
+
+**Design discussion, grounded in actual research, not just guessed at:**
+- **Flow theory (Csikszentmihalyi):** enjoyment peaks when challenge
+  tracks player skill - too easy is boring, too hard is anxiety-inducing.
+  This is the formal version of "never overmatched either direction," and
+  it's why Boo's own pick of **tuned static balance over live rubber-
+  banding** is the right call - flow theory is about a rising curve staying
+  matched to the player, not a system that visibly props up whoever's
+  currently losing (which reads as patronizing when players notice it).
+- **Loss aversion (Kahneman & Tversky):** losses hurt disproportionately
+  more than equivalent gains feel good - a loss that still hands you
+  something forward-moving measurably softens that sting. Directly backs
+  Boo's "earn a little even on a loss" instinct.
+- **Self-determination theory (Deci & Ryan):** the *feeling* of competence/
+  progress matters as much as the reward itself - implies the post-game
+  screen should visibly show what was earned, not just silently bank it.
+  Not yet built (see "Not built this step" below).
+- **Explicit caution (Boo asked about casino research specifically):**
+  slot machines/gacha lean on variable-ratio reinforcement (Skinner) -
+  unpredictable reward timing/size is what makes them compulsive, and
+  that's also what makes them manipulative rather than just fun. Decided
+  to go the opposite way on purpose - transparent, predictable economy
+  math (you always know what a win/loss earns and what an upgrade costs),
+  rewarding skill/persistence rather than manufactured uncertainty. This
+  project isn't monetized, so there's no reason to reach for that lever.
+
+**Decisions locked in (via AskUserQuestion + follow-up discussion):**
+- **Currency persists across games** (the meta-progression layer from the
+  earlier "Game design exploration" three-layer note), not a per-run-only
+  resource - matches "grind to get better, come back stronger." An in-run-
+  only currency layer (the *other* third of that original three-layer
+  note) is explicitly deferred, not decided against - "both eventually."
+- **Balance approach: tuned static, not live adaptive** - confirmed above.
+- **First thing it buys: Max HP** (simplest, proves the earn/spend/persist
+  loop end to end before anything more complex). Health regen (a brand
+  new mechanic, doesn't exist at all yet) and new weapons (the much bigger,
+  already-captured lasers/missiles/bombs design note) are later, not this
+  step.
+- **Planet size variation bundled into this same round** (Boo's call,
+  explicit) - not part of Step 1 below; its own step once Step 1/2 land.
+- **Name: "Gravitons"** - ties the currency directly to the game's actual
+  core mechanic (gravity) rather than a generic scrap/currency name. Boo's
+  own words: "lets go with gravitons for the time being. I may change in
+  the future" - deliberately not treated as permanent; renaming later is
+  just a label/string change, nothing structural depends on the name.
+
+**Planned build order** (same discipline as every other multi-part
+delivery - each step on-device-testable before the next lands):
+- **Step 1 - built, see its own entry immediately below.** Confirmed
+  working on-device (Boo: "gravitons work as expected").
+- **Step 2 - built, see its own entry further below.**
+- **Step 3 (not yet built):** planet size variation - generalizing
+  `PLANET_RADIUS` from a fixed constant to a per-planet randomized value,
+  touching `SlingshotInputProcessor`/`AiTurnController`/
+  `AvatarMovementController` (all three currently assume the fixed
+  constant) plus render/texture scaling. Independent of the currency work,
+  just bundled into this same round per Boo's call above.
+
+### Gravitons economy, Step 1: plumbing + earning - ✅ DONE, built (Sept 2026 session)
+
+Deliberately narrow: prove Gravitons actually accrue and persist, visible
+on the menu screen, before building anything that spends them.
+
+**What's built:**
+- **`GameSave.gravitons: Int`** (schema v4, purely additive - same safe
+  migration pattern as v2's `appLaunchCount`/v3's `winCount`).
+- **`SaveManager.awardGravitons(won: Boolean)`** - adds `GRAVITONS_PER_WIN`
+  (10) on a win or `GRAVITONS_PER_LOSS` (3) on a loss, then persists.
+  Deliberately separate from `recordWin()` (win-only) - this one is called
+  from BOTH of `PlayScreen`'s win and loss branches, since the whole point
+  is that a loss still moves you forward, just by less. Both amounts are
+  first-guess numbers, not derived from anything - same "ship a guess,
+  tune it once it's actually been played" treatment as
+  `TURN_CONTINUE_PAUSE_SECONDS` or `ShotSpeedTuning`'s default.
+- **`SaveManager.currentGravitons()`** - mirrors `currentWinCount()`.
+- **`MenuScreen` now shows "Gravitons: N"**, drawn directly under "Wins"
+  (both being the persistent-between-runs numbers), with "Runs completed"
+  shifted down to make room. Purely a visibility check for this step -
+  proves the balance is actually accruing, same role Phase 6's `runCount`
+  display originally played for `SaveManager` itself.
+
+**Explicitly NOT built this step:**
+- **Nothing spends Gravitons yet** - Step 2's job.
+- **No visible "+N Gravitons" feedback on the actual game-over screen** -
+  the self-determination-theory point above (visible progress matters as
+  much as the reward) is noted but not acted on this step; right now the
+  only way to see the balance change is to go back to the menu and notice
+  the number went up. Worth revisiting once Step 2 gives the number
+  something to actually mean.
+- Planet size variation (Step 3, separate).
+
+#### How to test Step 1 on-device
+
+1. Note the current "Gravitons: N" value on the menu screen before
+   playing (0 on a fresh save/install).
+2. Play a game to a loss. Return to the menu and confirm the number went
+   up by exactly 3.
+3. Play a game to a win. Return to the menu and confirm the number went
+   up by exactly 10 this time (more than a loss, per the design).
+4. Force-close and reopen the app (or otherwise cold-start it) and
+   confirm the Gravitons number survived - same persistence check every
+   other `SaveManager` field gets.
+5. Regression check: Wins/Runs completed counters still behave exactly as
+   before - this step only adds a new number, doesn't touch how those two
+   are earned or displayed otherwise.
+
+### Gravitons economy, Step 2: the first spend (Max HP upgrade) - ✅ DONE, built (Sept 2026 session)
+
+Confirmed via two follow-up `AskUserQuestion` rounds before building: the
+buy UI gets its own new `UpgradesScreen` (not a section bolted onto
+`MenuScreen`), and Max HP purchases are capped at a fixed ceiling rather
+than stacking forever (Boo, explicit - ties back to the "never overmatched"
+goal, since an uncapped climb would eventually make the player trivially
+durable against AI stats the campaign ladder never grows past a given
+tier).
+
+**Numbers, grounded in what's actually in the game, not picked blind:**
+both sides sit at 100 Max HP (`AVATAR_MAX_HP`/`TARGET_MAX_HP`) and a direct
+missile hit does 25 damage (`MISSILE_DAMAGE` - 4 hits to defeat). Landed
+on **+10 Max HP per purchase, capped at 5 purchases** (100 -> 150 HP, a
+50% buff at full investment), with an escalating cost curve - **15 / 30 /
+50 / 75 / 105 Gravitons** for levels 1 through 5 (275 total to max out).
+The escalating cost is deliberate: the cheap early levels help fastest
+over the "2v1 feels too hard" hump that started this whole economy, while
+the expensive later ones are a longer grind that roughly tracks reaching
+the campaign ladder's higher tiers - tying the two curves together instead
+of letting either race ahead of the other. Same "ship a guess, tune it
+once it's actually been played" treatment as every other feel constant in
+this project - not derived from anything beyond those two real in-game
+numbers.
+
+**What's built:**
+- **`GameSave.hpUpgradeLevel: Int`** (schema v5, purely additive - same
+  migration pattern as every schema bump before it).
+- **`SaveManager.purchaseHpUpgrade()`** - the actual spend: checks against
+  `nextHpUpgradeCost()` (null once capped), deducts Gravitons, increments
+  the level, persists. Returns `Boolean` (success/failure) but the only
+  caller ignores it - a failed attempt (can't afford it, or already
+  maxed) changes nothing, and the very next frame's redraw already shows
+  whatever actually happened either way.
+- **`SaveManager.hpUpgradeBonus()`** - `hpUpgradeLevel * HP_PER_UPGRADE_LEVEL`
+  (10). Read by `PlayScreen`'s `playerCharacters` construction, added on
+  top of the existing `AVATAR_MAX_HP` constant - **player-side only**, AI
+  characters stay at the plain `TARGET_MAX_HP`, untouched. `AVATAR_MAX_HP`
+  itself lost its `private` modifier so `UpgradesScreen` can display the
+  same base number `SaveManager` builds on top of, without a second,
+  drift-prone copy of "100" living in two files.
+- **New `UpgradesScreen`** - a dedicated screen, same "solid color, tap
+  zone" pattern every other screen in this project uses (`PauseScreen`'s
+  left/right split, generalized here to two vertical bands instead, since
+  this screen also needs room above them for the stat readout: title,
+  current Gravitons balance, current Max HP + level, then a BUY band
+  (dims to gray and reads "MAXED OUT" once capped) and a BACK band below
+  it. Reached only from `MenuScreen` - see next bullet - never mid-run.
+- **`MenuScreen`'s one exception to "tap anywhere plays"** - a small
+  top-right corner zone (last 35% width, top 15% height) now opens
+  `UpgradesScreen` instead, with an "Upgrades >" label drawn there so it's
+  discoverable. Deliberately corner-anchored and small so it can't be
+  brushed by accident on the way to starting a game.
+
+**Explicitly NOT built this step:**
+- Nothing else is purchasable yet - health regen and new weapons are
+  later, separate work (see the design-discussion section above).
+- No "insufficient funds" feedback beyond the button simply not doing
+  anything when unaffordable - no error message, no shake/flash. Worth
+  revisiting if that reads as broken/unresponsive on-device rather than
+  "nothing happened because you can't afford it yet."
+- Planet size variation (Step 3, still separate, still not started).
+
+#### How to test Step 2 on-device
+
+1. From the menu, tap the "Upgrades >" label in the top-right corner -
+   confirm it opens a new dark-purple screen (not a game), showing your
+   current Gravitons balance and "Max HP: 100 (Lv 0/5)".
+2. With fewer than 15 Gravitons banked, tap the BUY band - confirm
+   nothing happens (balance/level both unchanged) - this is the
+   "unaffordable" case, silent by design (see above).
+3. Grind (or otherwise reach) at least 15 Gravitons, tap BUY again -
+   confirm the balance drops by 15, the level reads "Lv 1/5", and the Max
+   HP line now reads 110.
+4. Play a game as the player side and confirm you can actually take more
+   hits than before at Lv 1+ - e.g. at Lv 1 (110 HP) you should survive a
+   5th direct hit that would have been fatal at the old 100 HP/4-hit math.
+   AI characters should be completely unaffected - still defeated in
+   exactly 4 hits as always.
+5. Buy through all 5 levels (or manually verify the cost sequence 15/30/
+   50/75/105) and confirm the screen reads "MAX HP - MAXED OUT" (band
+   dims to gray) once Lv 5/5 is reached, and tapping that band does
+   nothing further - balance stays put, no 6th level appears.
+6. Tap BACK and confirm it returns cleanly to the menu, with the same
+   Gravitons/Wins/Runs numbers as before (nothing lost in the round trip).
+7. Force-close and reopen the app - confirm both the Gravitons balance
+   and the HP upgrade level survived, and a fresh game correctly starts
+   your character(s) at whatever HP the current level grants.
+8. Regression check: tapping anywhere else on the menu (i.e. NOT that
+   corner) still starts a fresh game immediately, exactly as before.
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.

@@ -442,9 +442,15 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // hitbox matches the size of the cyan marker circle Boo already
         // sees on screen, rather than an invisible mismatch between what's
         // drawn and what's hittable. AVATAR_MAX_HP matches TARGET_MAX_HP -
-        // no reason yet for the two sides to be asymmetric.
+        // no reason yet for the two sides to be asymmetric (the Gravitons
+        // economy below adds a player-only bonus ON TOP of this base value,
+        // rather than making the two sides asymmetric at their root).
         private const val AVATAR_RADIUS = LAUNCH_MARKER_RADIUS
-        private const val AVATAR_MAX_HP = 100
+        // Gravitons economy Step 2 (Sept 2026 session) - no longer private:
+        // UpgradesScreen displays this exact base number alongside
+        // SaveManager's HP upgrade bonus (see playerCharacters' construction
+        // below for where the two actually get added together).
+        const val AVATAR_MAX_HP = 100
 
         // Box2D collision-filter categories - only exist to solve one
         // specific problem (see fireMissile's `excludeCategory` parameter):
@@ -1471,7 +1477,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             val body = createAvatarBody(controller.position, category)
             val entity = Entity().apply {
                 add(PhysicsBodyComponent(body))
-                add(HealthComponent(AVATAR_MAX_HP))
+                // Gravitons economy Step 2 (Sept 2026 session) - the
+                // permanent Max HP upgrade (see UpgradesScreen) applies
+                // here, player-side only. AI characters stay at the plain
+                // TARGET_MAX_HP below, untouched - the upgrade is meant to
+                // counterbalance the campaign ladder's AI-side growth, not
+                // shift the whole game's HP scale.
+                add(HealthComponent(AVATAR_MAX_HP + SaveManager.hpUpgradeBonus()))
             }
             engine.addEntity(entity)
             PlayerCharacterState(controller, body, entity, playerCharacterPlanets[i])
@@ -2852,6 +2864,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // only one.
         if (playerCharacters.all { healthMapper.get(it.entity).isDefeated }) {
             SaveManager.recordRunEnded() // Phase 6 - same "persist before tearing down" step PauseScreen's manual quit already does
+            SaveManager.awardGravitons(won = false) // Gravitons economy Step 1 - a loss still earns some, see that function's doc comment
             dispose() // this run is genuinely over - see dispose()'s own doc comment
             game.setScreen(GameOverScreen(game, won = false))
             return
@@ -2859,6 +2872,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         if (aiCharacters.all { healthMapper.get(it.entity).isDefeated }) {
             SaveManager.recordRunEnded()
             SaveManager.recordWin() // Phase 23 - the win-only progression counter, see SaveManager.recordWin's doc comment
+            SaveManager.awardGravitons(won = true) // Gravitons economy Step 1 - see that function's doc comment
             dispose()
             game.setScreen(GameOverScreen(game, won = true))
             return

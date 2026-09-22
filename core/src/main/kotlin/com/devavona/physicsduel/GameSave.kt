@@ -29,6 +29,16 @@ package com.devavona.physicsduel
  *   persistent, win-only counter (see PROJECT_STATE.md's "Campaign
  *   progression ladder" entry - never decremented or reset by a loss,
  *   deliberately not a roguelite streak). Purely additive, same as v2.
+ * - v4 (Sept 2026 session, Gravitons economy Step 1): added `gravitons` -
+ *   the persistent currency earned at the end of every game (see
+ *   [SaveManager.awardGravitons]), win or lose - unlike [winCount], this
+ *   one deliberately DOES accrue on a loss, just less of it. Purely
+ *   additive, same migration story as v2/v3.
+ * - v5 (Sept 2026 session, Gravitons economy Step 2): added
+ *   `hpUpgradeLevel` - how many times the permanent Max HP upgrade has
+ *   been purchased (see [SaveManager.purchaseHpUpgrade]), capped at
+ *   [SaveManager.MAX_HP_UPGRADE_LEVEL]. Purely additive, same as every
+ *   schema bump before it.
  */
 class GameSave {
     var schemaVersion: Int = CURRENT_SCHEMA_VERSION
@@ -37,8 +47,12 @@ class GameSave {
     var appLaunchCount: Int = 0
     /** Wins only - see [SaveManager.recordWin] and this class's v3 schema-history note. */
     var winCount: Int = 0
+    /** Persistent currency - see [SaveManager.awardGravitons] and this class's v4 schema-history note. */
+    var gravitons: Int = 0
+    /** Max HP upgrade level - see [SaveManager.purchaseHpUpgrade] and this class's v5 schema-history note. */
+    var hpUpgradeLevel: Int = 0
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 3
+        const val CURRENT_SCHEMA_VERSION = 5
     }
 }
