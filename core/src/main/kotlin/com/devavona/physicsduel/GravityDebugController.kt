@@ -46,14 +46,22 @@ class GravityDebugController(private val gravitySystem: GravitySystem) : InputAd
         // hanging the button row below it, instead of trying to place the
         // label above an already-placed row, keeps both always on-screen.
         private const val LABEL_RESERVE_REFERENCE_PX = 70f
+
+        // Sept 2026 session - DebugMenuController's hamburger icon now sits
+        // above this (the topmost) row - its own icon size (160) plus one
+        // row gap (16) worth of clearance, matching the same "button size +
+        // gap" shape every stacked row below this one already uses. See
+        // that class's own doc comment.
+        private const val HAMBURGER_RESERVE_REFERENCE_PX = 176f
     }
 
     private val buttonSize get() = HudFont.scaled(BUTTON_SIZE_REFERENCE_PX)
     private val margin get() = HudFont.scaled(MARGIN_REFERENCE_PX)
     private val labelReserve get() = HudFont.scaled(LABEL_RESERVE_REFERENCE_PX)
+    private val hamburgerReserve get() = HudFont.scaled(HAMBURGER_RESERVE_REFERENCE_PX)
 
-    /** Top edge (render-space Y) of the button row - below [margin] + [labelReserve]'s worth of space held for the label above it. */
-    private val buttonRowTop: Float get() = Gdx.graphics.height - margin - labelReserve
+    /** Top edge (render-space Y) of the button row - below [margin] + [hamburgerReserve] + [labelReserve]'s worth of space held above it. */
+    private val buttonRowTop: Float get() = Gdx.graphics.height - margin - hamburgerReserve - labelReserve
 
     /** Where [PlayScreen] should draw the "Gravity xN.N" label's top edge - within the space [labelReserve] holds open above the button row. */
     val labelBaselineY: Float get() = Gdx.graphics.height - margin

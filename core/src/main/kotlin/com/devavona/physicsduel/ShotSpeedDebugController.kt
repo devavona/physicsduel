@@ -32,26 +32,32 @@ class ShotSpeedDebugController(private val shotSpeedTuning: ShotSpeedTuning) : I
         // Vertical gap between this row and GravityDebugController's row
         // directly above it.
         private const val ROW_GAP_REFERENCE_PX = 16f
+
+        // Sept 2026 session - see GravityDebugController's own constant of
+        // the same name (DebugMenuController's hamburger icon sits above
+        // ITS row, and this row is positioned relative to that one).
+        private const val HAMBURGER_RESERVE_REFERENCE_PX = 176f
     }
 
     private val buttonSize get() = HudFont.scaled(BUTTON_SIZE_REFERENCE_PX)
     private val margin get() = HudFont.scaled(MARGIN_REFERENCE_PX)
     private val labelReserve get() = HudFont.scaled(LABEL_RESERVE_REFERENCE_PX)
     private val rowGap get() = HudFont.scaled(ROW_GAP_REFERENCE_PX)
+    private val hamburgerReserve get() = HudFont.scaled(HAMBURGER_RESERVE_REFERENCE_PX)
 
     /**
      * Where this row's "top" should be to sit directly below
      * [GravityDebugController]'s row - computed from the same reference
-     * constants that row uses (`Gdx.graphics.height - margin` is its own
-     * starting point; subtracting its label reserve and button height gets
-     * to its bottom edge, then [rowGap] leaves a gap before this row
-     * starts). Self-contained on purpose - doesn't read
+     * constants that row uses (`Gdx.graphics.height - margin - hamburgerReserve`
+     * is its own starting point; subtracting its label reserve and button
+     * height gets to its bottom edge, then [rowGap] leaves a gap before this
+     * row starts). Self-contained on purpose - doesn't read
      * GravityDebugController's actual rects at runtime, just relies on
      * both classes using the same reference sizes, since both are built
      * once by the same [PlayScreen].
      */
     private val rowTopReference: Float
-        get() = Gdx.graphics.height - margin - labelReserve - buttonSize - rowGap
+        get() = Gdx.graphics.height - margin - hamburgerReserve - labelReserve - buttonSize - rowGap
 
     /** Where [PlayScreen] should draw the "Shot Speed xN.N" label's top edge. */
     val labelBaselineY: Float get() = rowTopReference

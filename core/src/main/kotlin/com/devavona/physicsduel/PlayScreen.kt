@@ -968,6 +968,12 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     // pattern, stacked as the fourth row in the same corner.
     private lateinit var orbitalDriftTuning: OrbitalDriftTuning
     private lateinit var orbitalDriftDebugController: OrbitalDriftDebugController
+    // Sept 2026 session - Boo, on-device: the four debug rows above
+    // permanently ate a large chunk of the top-right corner. This wraps all
+    // four behind one hamburger icon/toggle - see its own class doc comment.
+    // The only thing added to the input multiplexers for any of the four
+    // now (see show()) - it forwards taps to them itself, only while open.
+    private lateinit var debugMenuController: DebugMenuController
 
     // Phase 7 HUD: a screen-pixel (not world-unit) camera + batch, separate
     // from [camera]/[viewport] above which stay in Box2D world units for the
@@ -1523,6 +1529,9 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         winCountDebugController = WinCountDebugController()
         orbitalDriftTuning = OrbitalDriftTuning()
         orbitalDriftDebugController = OrbitalDriftDebugController(orbitalDriftTuning)
+        debugMenuController = DebugMenuController(
+            listOf(gravityDebugController, shotSpeedDebugController, winCountDebugController, orbitalDriftDebugController)
+        )
 
         // Sept 2026 session - frames the player's own avatar from the very
         // first frame, same as every later turn-transition snap, instead of
@@ -1544,27 +1553,21 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             // its own class doc comment.
             addProcessor(cameraGestureController)
             addProcessor(BackKeyHandler())
-            addProcessor(gravityDebugController)
-            addProcessor(shotSpeedDebugController)
-            addProcessor(winCountDebugController)
-            addProcessor(orbitalDriftDebugController)
+            addProcessor(debugMenuController)
             addProcessor(activePlayerCharacter().controller)
             addProcessor(slingshotInputProcessor)
         }
         // Deliberately still includes BackKeyHandler (pausing should always
-        // work), gravityDebugController/shotSpeedDebugController (both
-        // standing debug tools, not something turn structure should ever
-        // lock out), and cameraGestureController (looking around isn't a
-        // turn action - the player can pinch/pan during the AI's turn same
-        // as their own) - only the player's own movement/aiming input is
-        // left out during the AI's turn.
+        // work), debugMenuController (the standing debug tools it wraps
+        // aren't something turn structure should ever lock out), and
+        // cameraGestureController (looking around isn't a turn action - the
+        // player can pinch/pan during the AI's turn same as their own) -
+        // only the player's own movement/aiming input is left out during
+        // the AI's turn.
         restrictedInputProcessor = InputMultiplexer().apply {
             addProcessor(cameraGestureController)
             addProcessor(BackKeyHandler())
-            addProcessor(gravityDebugController)
-            addProcessor(shotSpeedDebugController)
-            addProcessor(winCountDebugController)
-            addProcessor(orbitalDriftDebugController)
+            addProcessor(debugMenuController)
             // Sept 2026 session - see ContinueTapInputProcessor's own doc
             // comment for why this is last.
             addProcessor(ContinueTapInputProcessor())
@@ -1578,10 +1581,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         orderPickerInputProcessor = InputMultiplexer().apply {
             addProcessor(cameraGestureController)
             addProcessor(BackKeyHandler())
-            addProcessor(gravityDebugController)
-            addProcessor(shotSpeedDebugController)
-            addProcessor(winCountDebugController)
-            addProcessor(orbitalDriftDebugController)
+            addProcessor(debugMenuController)
             addProcessor(PlayerOrderPickerInputProcessor())
         }
         Gdx.input.inputProcessor = fullInputProcessor
@@ -2917,10 +2917,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // here, right before any HUD drawing, fixes it.
         Gdx.gl.glViewport(0, 0, Gdx.graphics.width, Gdx.graphics.height)
         renderHud()
-        renderGravityDebugControls()
-        renderShotSpeedDebugControls()
-        renderWinCountDebugControls()
-        renderOrbitalDriftDebugControls()
+        renderDebugMenu()
         renderMovementControls()
         renderStatsPanel()
         renderContinuePrompt()
@@ -3281,6 +3278,46 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         hudBatch.begin()
         HudFont.font.draw(hudBatch, label, (Gdx.graphics.width - HudFont.widthOf(label)) / 2f, Gdx.graphics.height / 3f)
         hudBatch.end()
+    }
+
+    /**
+     * Sept 2026 session - draws [DebugMenuController]'s hamburger icon
+     * (always visible, top-right corner) plus, only while
+     * [DebugMenuController.isOpen], the four existing debug-tuning rows
+     * exactly as they always rendered - see that class's own doc comment
+     * for why this replaced four permanently-visible widgets.
+     */
+    private fun renderDebugMenu() {
+        val iconRect = debugMenuController.iconRect
+
+        hudBatch.projectionMatrix = hudCamera.combined
+        hudBatch.begin()
+        buttonPatch.draw(hudBatch, iconRect.x, iconRect.y, iconRect.width, iconRect.height)
+        hudBatch.end()
+
+        // Three horizontal bars via shapeRenderer, not a text glyph -
+        // LibGDX's default BitmapFont's character set isn't guaranteed to
+        // include a hamburger-style Unicode glyph, but a filled rect always
+        // renders identically everywhere.
+        shapeRenderer.projectionMatrix = hudCamera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        shapeRenderer.color = Color.WHITE
+        val barHeight = iconRect.height * 0.12f
+        val barWidth = iconRect.width * 0.6f
+        val barX = iconRect.x + (iconRect.width - barWidth) / 2f
+        val barGap = iconRect.height * 0.22f
+        val centerY = iconRect.y + iconRect.height / 2f
+        shapeRenderer.rect(barX, centerY - barHeight / 2f, barWidth, barHeight)
+        shapeRenderer.rect(barX, centerY - barHeight / 2f + barGap, barWidth, barHeight)
+        shapeRenderer.rect(barX, centerY - barHeight / 2f - barGap, barWidth, barHeight)
+        shapeRenderer.end()
+
+        if (debugMenuController.isOpen) {
+            renderGravityDebugControls()
+            renderShotSpeedDebugControls()
+            renderWinCountDebugControls()
+            renderOrbitalDriftDebugControls()
+        }
     }
 
     /**

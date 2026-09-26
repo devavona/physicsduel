@@ -42,12 +42,17 @@ class WinCountDebugController : InputAdapter() {
         private const val MARGIN_REFERENCE_PX = 16f
         private const val LABEL_RESERVE_REFERENCE_PX = 70f
         private const val ROW_GAP_REFERENCE_PX = 16f
+
+        // Sept 2026 session - see GravityDebugController's own constant of
+        // the same name.
+        private const val HAMBURGER_RESERVE_REFERENCE_PX = 176f
     }
 
     private val buttonSize get() = HudFont.scaled(BUTTON_SIZE_REFERENCE_PX)
     private val margin get() = HudFont.scaled(MARGIN_REFERENCE_PX)
     private val labelReserve get() = HudFont.scaled(LABEL_RESERVE_REFERENCE_PX)
     private val rowGap get() = HudFont.scaled(ROW_GAP_REFERENCE_PX)
+    private val hamburgerReserve get() = HudFont.scaled(HAMBURGER_RESERVE_REFERENCE_PX)
 
     /**
      * Where this row's "top" should be to sit directly below
@@ -57,7 +62,7 @@ class WinCountDebugController : InputAdapter() {
      * further down, since this is the third stacked row, not the second).
      */
     private val rowTopReference: Float
-        get() = Gdx.graphics.height - margin - labelReserve - buttonSize - rowGap - labelReserve - buttonSize - rowGap
+        get() = Gdx.graphics.height - margin - hamburgerReserve - labelReserve - buttonSize - rowGap - labelReserve - buttonSize - rowGap
 
     /** Where [PlayScreen] should draw the "Wins: N" label's top edge. */
     val labelBaselineY: Float get() = rowTopReference

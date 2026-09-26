@@ -5537,6 +5537,81 @@ completely, since Pause's "end run" already routes there.
    to confirm the split works identically regardless of how the outcome
    screen was reached.
 
+## Hamburger menu for the debug-tuning tools (Sept 2026 session)
+
+Boo, on-device: "before we do that, I want to modify the main screen
+buttons. the debugging buttons I want to move into a hamburger menu in
+order to free up screen realestate." The four stacked debug-tuning rows
+(`GravityDebugController`/`ShotSpeedDebugController`/
+`WinCountDebugController`/`OrbitalDriftDebugController`) were permanently
+visible in the top-right corner, eating a large chunk of screen real
+estate throughout every match.
+
+**Fix - new `DebugMenuController.kt`, wrapping all four, not replacing
+any of them:**
+
+- Draws a single hamburger icon (three bars via `shapeRenderer`, drawn on
+  a `buttonPatch` background) in the same top-right corner, above where
+  the four rows used to start.
+- Closed by default (`isOpen = false`) - freeing up the corner is the
+  whole point. While closed: only the icon itself draws, and taps on
+  where the four rows used to be do nothing (they're not drawn, and not
+  hit-tested).
+- Tapping the icon toggles `isOpen`. While open: the icon still draws,
+  plus all four original rows draw and accept taps exactly as they
+  always did - same buttons, same live tuning behavior, nothing about
+  the four controllers' own logic changed.
+- `PlayScreen` now adds only `debugMenuController` to each of its three
+  `InputMultiplexer`s (`fullInputProcessor`/`restrictedInputProcessor`/
+  `orderPickerInputProcessor`) in place of the four individual
+  `addProcessor(...)` calls that used to be there. `DebugMenuController`
+  itself forwards taps to whichever wrapped controller claims them, only
+  while open (`wrapped.any { it.touchDown(...) }` - same
+  first-to-claim-it semantics `InputMultiplexer` itself uses).
+- `render()` now calls a single new `renderDebugMenu()` in place of the
+  four separate `renderXDebugControls()` calls - it draws the icon
+  unconditionally, then calls all four of the original (unchanged)
+  render functions only `if (debugMenuController.isOpen)`.
+- Each of the four wrapped controllers gained one new constant
+  (`HAMBURGER_RESERVE_REFERENCE_PX = 176f` - the icon's own 160px size
+  plus one 16px row-gap) threaded into its existing row-position math
+  right after the top margin, so the topmost row now starts below the
+  icon instead of overlapping it. Same "self-contained, duplicated
+  reference constants" pattern those four classes already used relative
+  to each other - no runtime coupling, no controller reads another
+  controller's live rect.
+- Nothing else about the four controllers changed - same tap zones
+  relative to each other, same tuning step sizes, same persistence
+  behavior (`WinCountDebugController`'s save-affecting buttons work
+  identically to before).
+
+#### How to test this fix on-device
+
+1. Start a game - confirm the top-right corner now shows just a small
+   hamburger icon, and the four debug rows that used to fill that corner
+   are gone.
+2. Tap the hamburger icon - confirm all four rows appear (Gravity,
+   Shot Speed, Wins, Drift Speed), stacked below the icon exactly as
+   they used to be positioned from the top of the screen.
+3. Tap it again - confirm all four rows disappear and only the icon
+   remains.
+4. With the menu open, tap each of the four rows' +/- (or +1 Win/Reset)
+   buttons - confirm each still does exactly what it always did (gravity
+   multiplier changes, shot speed multiplier changes, win count
+   increments/resets, drift speed changes) and that tapping a button
+   does NOT also close the menu.
+5. With the menu open, tap one of the debug buttons near the icon and
+   confirm the icon itself isn't accidentally triggered (no
+   overlap/misfire between the icon's tap zone and the topmost row).
+6. Confirm this all still works identically during the AI's turn
+   (`restrictedInputProcessor`) and during the player's turn-order
+   picker (`orderPickerInputProcessor`), not just during normal player
+   input.
+7. Confirm the freed-up screen space is actually usable now - nothing
+   else was drawn into that area, so this is just a visual check that
+   the corner looks clean with the menu closed.
+
+
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 
 - **16 KB native alignment** — resolved, see "Resolved risks" above.
