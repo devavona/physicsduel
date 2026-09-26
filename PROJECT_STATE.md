@@ -5573,17 +5573,25 @@ any of them:**
   unconditionally, then calls all four of the original (unchanged)
   render functions only `if (debugMenuController.isOpen)`.
 - Each of the four wrapped controllers gained one new constant
-  (`HAMBURGER_RESERVE_REFERENCE_PX = 176f` - the icon's own 160px size
-  plus one 16px row-gap) threaded into its existing row-position math
-  right after the top margin, so the topmost row now starts below the
-  icon instead of overlapping it. Same "self-contained, duplicated
-  reference constants" pattern those four classes already used relative
-  to each other - no runtime coupling, no controller reads another
-  controller's live rect.
+  (`HAMBURGER_RESERVE_REFERENCE_PX` - the icon's own size plus one 16px
+  row-gap) threaded into its existing row-position math right after the
+  top margin, so the topmost row now starts below the icon instead of
+  overlapping it. Same "self-contained, duplicated reference constants"
+  pattern those four classes already used relative to each other - no
+  runtime coupling, no controller reads another controller's live rect.
 - Nothing else about the four controllers changed - same tap zones
   relative to each other, same tuning step sizes, same persistence
   behavior (`WinCountDebugController`'s save-affecting buttons work
   identically to before).
+- **Follow-up (same session):** Boo, on-device, found the icon itself too
+  large. `DebugMenuController.ICON_SIZE_REFERENCE_PX` halved (160f ->
+  80f), and the matching `HAMBURGER_RESERVE_REFERENCE_PX` in all four
+  wrapped controllers dropped from 176f to 96f (80 + 16 gap) to match -
+  the topmost row now starts closer to the icon again instead of leaving
+  a stale gap sized for the old, larger icon.
+- ✅ **DONE** — confirmed on-device (all four debug tools still work
+  correctly with the menu both open and closed, at the smaller icon
+  size).
 
 #### How to test this fix on-device
 
@@ -5611,6 +5619,99 @@ any of them:**
    else was drawn into that area, so this is just a visual check that
    the corner looks clean with the menu closed.
 
+**Git note:** this hamburger-menu work and the move-button icon work
+below landed as three separate commits rather than the one clean commit
+originally planned - `6743c8d` (hamburger menu only), `a5644e0`
+(+ first rotation-icon attempt), `51e522c` (+ size/color/rotation
+follow-up on that first attempt). Each commit block handed to Boo was
+meant to supersede the previous one, but he ran more than one of them
+before this was caught. Nothing is broken by this (all three are valid
+incremental snapshots, working tree was clean between them), it's just
+not the single squashed commit the earlier write-up implied - flagging
+here rather than leaving the doc's story wrong. Per the standing "never
+rewrite pushed history" rule, these are staying as three commits, not
+being squashed after the fact.
+
+## Move-button rotation icons (Sept 2026 session, same session)
+
+The bottom-left move buttons (`AvatarMovementController.leftButtonRect`/
+`rightButtonRect`, drawn by `PlayScreen.renderMovementControls`) used to
+show plain `"<"`/`">"` text labels. Boo: "for the bottom left buttons. I
+want to remove the '<' and the '>' character on those buttons and
+replace with a symbol for counter clockwise (left) and clockwise
+(right)." Left increases `AvatarMovementController.angleDegrees`
+(counter-clockwise, standard unit-circle convention); right decreases it
+(clockwise) - the icons need to match that mapping, not just look like
+"some rotation arrows."
+
+**Three attempts, in order (first two committed as-is, final one
+supersedes both in code even though their commits stay in history per
+the note above):**
+
+1. **First attempt** (commit `a5644e0`): a ring built from `shapeRenderer`
+   filled triangles (same technique `DebugMenuController`'s hamburger
+   bars use, since `HudFont`'s plain `BitmapFont` has no rotation-arrow
+   glyph to draw), sweeping ~260° with a tangent arrowhead at the open
+   end, both icons starting from the same top-center point (true mirror
+   images). Boo, on-device with a hand-drawn overlay on a screenshot:
+   "I dont like the arrows as is. rotate them so that they are more
+   closely resebling what I drew."
+2. **Second attempt** (commit `51e522c`): rotated each icon's start point
+   outward by 50° (mirrored - left toward upper-left, right toward
+   upper-right), shrunk `DebugMenuController`'s hamburger icon by 50%,
+   and recolored both the rotation icons and the hamburger bars from
+   solid `Color.WHITE` to a softer, semi-transparent gray
+   (`HUD_ICON_COLOR`) - which needed GL blending turned on around just
+   those two draws, since `ShapeRenderer` doesn't enable it by default
+   and nothing else on this screen needed alpha. Boo: still didn't match
+   what he'd drawn - "none of these are close to what I drew earlier."
+3. **Final design** (uncommitted as of this write-up - see below): Boo
+   sent four reference images of a standard "undo/redo"-style rotate
+   icon instead of another hand sketch. Rather than eyeball them,
+   pixel-analyzed the actual PNGs (found the ring's true gap angle,
+   thickness, and the arrowhead's attach point numerically), then
+   visually confirmed a reconstruction side-by-side against the
+   references before touching the Kotlin file. The design this settled
+   on is a genuinely different shape from both earlier attempts:
+   - A near-full ring (only one small ~12° gap, both ends plain rounded
+     cuts - no arrowhead at either end of the gap itself).
+   - A **separate** arrowhead: a simple triangle that always points
+     straight up (screen-space, not tangent to the ring), attached to the
+     ring's left side (due west) for the counter-clockwise/left icon, or
+     right side (due east) for the clockwise/right icon - mirrored across
+     the vertical axis, same mirrored-pair relationship every version of
+     this icon has used.
+   - New constants in `PlayScreen`'s companion object:
+     `RING_MID_RADIUS_FRACTION` (0.31), `RING_THICKNESS_FRACTION`
+     (0.085), `RING_GAP_START_DEGREES`/`RING_GAP_END_DEGREES` (136/148 -
+     the left icon's gap, measured from the reference image),
+     `ARROW_ATTACH_DEGREES` (180, due west for the left icon),
+     `ARROW_BASE_WIDTH_FACTOR`/`ARROW_HEIGHT_FACTOR`/
+     `ARROW_BASE_OVERLAP_FACTOR` for the triangle's proportions. All of
+     the previous attempts' constants (`ARC_START_DEGREES`,
+     `ARC_SWEEP_DEGREES`, `ARC_ROTATION_DEGREES`, etc.) are gone - this
+     isn't a tuning tweak on the old shape, it's a different shape.
+   - `HUD_ICON_COLOR` and the GL-blend-around-the-draw approach from
+     attempt 2 are unchanged and still apply.
+   - Boo, after seeing the reference-vs-reconstruction comparison and a
+     render of the actual Kotlin math (both sent as images before
+     touching the game file): "this is fine."
+
+#### How to test the final move-button icons on-device
+
+1. Start a game - the bottom-left move buttons should now show a
+   standard rotate-icon shape (a near-full ring with one small gap near
+   the top, plus a small triangle pointing straight up attached to the
+   ring's side) instead of the rotated-arc shapes from attempt 2.
+2. Left button's triangle should be attached on the ring's LEFT side;
+   right button's on the RIGHT side - the two should read as true mirror
+   images of each other.
+3. Confirm tapping each button still moves the avatar the same direction
+   it always did (left = counter-clockwise/increases angleDegrees, right
+   = clockwise/decreases it) - only the drawing changed, not
+   `AvatarMovementController`'s own logic.
+4. Confirm the icons are still the same muted/semi-transparent gray as
+   the hamburger icon, not solid white.
 
 ## Post-foundation hardening (not numbered phases — ongoing, as-needed)
 

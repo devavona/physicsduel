@@ -437,33 +437,51 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // anything else in the scene.
         private const val AIM_PREVIEW_INVALID_MAX_DISTANCE = 3f
 
-        // Sept 2026 session - drawRotationArrowIcon's shape (see that
-        // function's doc comment). Fractions are of the button rect's own
+        // Sept 2026 session, second follow-up: Boo sent four reference
+        // images of a standard "undo/redo"-style rotate icon (a near-full
+        // ring with one small gap, plus a separate straight-up-pointing
+        // arrowhead attached to the ring's side - not a tangent arrowhead
+        // at the end of the arc, which is what the two earlier attempts
+        // both got wrong) and asked for a close match, "note specifically
+        // the starting point and where the arrow terminates." These
+        // numbers come from measuring that reference image directly
+        // (pixel-analyzed, then visually confirmed side-by-side against a
+        // reconstruction before porting to this file) rather than another
+        // guess - see drawRotationArrowIcon's doc comment for the full
+        // shape this describes. Fractions are of the button rect's own
         // width, so the icon scales with the button instead of needing its
-        // own HudFont.scaled() reference-pixel constant. Tuned by eye, same
-        // "debug-grade, not final art" spirit as every other button on this
-        // screen - see renderMovementControls' doc comment.
-        private const val ARROW_OUTER_RADIUS_FRACTION = 0.32f
-        private const val ARROW_RING_THICKNESS_FRACTION = 0.10f
-        private const val ARC_START_DEGREES = 90f
-        private const val ARC_SWEEP_DEGREES = 260f
-        private const val ARC_SEGMENTS = 20
-        private const val ARROWHEAD_LENGTH_FACTOR = 2.6f
-        private const val ARROWHEAD_HALF_WIDTH_FACTOR = 1.7f
+        // own HudFont.scaled() reference-pixel constant.
+        private const val RING_MID_RADIUS_FRACTION = 0.31f
+        private const val RING_THICKNESS_FRACTION = 0.085f
+        private const val RING_SEGMENTS = 48
 
-        // Sept 2026 session, same-session follow-up: Boo, on-device
-        // screenshot with a hand-drawn overlay - the icons drawn dead-
-        // centered on ARC_START_DEGREES (90, straight up) read as too
-        // symmetric/upright compared to the diagonal, swooping curve he
-        // sketched. This rotates each icon's start point away from center-
-        // top by this many degrees - left (counter-clockwise) rotates
-        // toward upper-LEFT, right (clockwise) rotates toward upper-RIGHT,
-        // a mirror-image pair exactly like the un-rotated version (see
-        // drawRotationArrowIcon's use of it) - just tilted outward instead
-        // of both starting from the same top-center point. Tune this one
-        // constant up or down if the angle still isn't quite right; it's
-        // the single knob for "how tilted."
-        private const val ARC_ROTATION_DEGREES = 50f
+        // The reference icon's gap (its one true break in the ring) sits
+        // just left of straight-up-top, spanning these two angles (measured
+        // from the button's center, standard math convention - 0=east,
+        // 90=north/straight up, angle increasing counter-clockwise). This
+        // is the LEFT/counter-clockwise icon's gap; the right/clockwise
+        // icon mirrors it across the vertical axis (angle -> 180 - angle),
+        // same mirrored-pair approach every earlier version of this icon
+        // used.
+        private const val RING_GAP_START_DEGREES = 136f
+        private const val RING_GAP_END_DEGREES = 148f
+
+        // The reference icon's arrowhead isn't at either end of the gap -
+        // it's a separate straight-up-pointing triangle attached to the
+        // ring's LEFT side (due west, 180°) for the counter-clockwise icon
+        // - mirrored to due east (0°) for the clockwise one. It points
+        // straight up regardless of where it's attached (not tangent to the
+        // ring), which is what makes the reference read so cleanly as a
+        // simple, recognizable icon rather than the previous tangent-based
+        // attempts.
+        private const val ARROW_ATTACH_DEGREES = 180f
+        private const val ARROW_BASE_WIDTH_FACTOR = 2.6f
+        private const val ARROW_HEIGHT_FACTOR = 3.8f
+        // How far the arrowhead's base extends past the ring's own
+        // centerline (as a fraction of ring thickness) - just enough to
+        // fully cover the ring stroke's rounded end there so the two blend
+        // without a visible seam.
+        private const val ARROW_BASE_OVERLAP_FACTOR = 0.55f
 
         // Sept 2026 session, same-session follow-up: Boo, on-device - the
         // rotation-arrow icons and the hamburger icon (drawn in
@@ -3559,29 +3577,47 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
     }
 
     /**
-     * Draws a circular rotation-arrow icon (a ring-shaped arc plus a
-     * triangular arrowhead at its open end) centered inside [rect],
-     * curving clockwise or counter-clockwise per [clockwise] - see
-     * [renderMovementControls]'s call site for which direction each
-     * movement button actually is. Built entirely from filled triangles:
-     * the ring is a strip of small quads (two triangles each) following
-     * the arc from [startAngle] around by [ARC_SWEEP_DEGREES] (negated for
-     * the clockwise direction), and the arrowhead is one more triangle at
-     * the open end, pointing tangent to the ring in the direction of
-     * travel. [startAngle] is [ARC_START_DEGREES] (top-center) rotated
-     * outward by [ARC_ROTATION_DEGREES] - left tilts toward upper-left,
-     * right tilts toward upper-right, a mirror-image pair either way (see
-     * that constant's own doc comment for why).
+     * Draws a standard "undo/redo"-style rotation icon centered inside
+     * [rect], mirrored for clockwise vs counter-clockwise per [clockwise] -
+     * see [renderMovementControls]'s call site for which direction each
+     * movement button actually is.
+     *
+     * Sept 2026 session, second follow-up: replaces the two earlier
+     * attempts (a tangent arrowhead at the end of a partial arc), which
+     * Boo confirmed still didn't match after the first rotation tweak. He
+     * sent reference images of the standard rotate-icon shape instead - a
+     * near-full ring with exactly one small gap (both ends plain, rounded
+     * cuts - see [RING_GAP_START_DEGREES]/[RING_GAP_END_DEGREES]), plus a
+     * SEPARATE arrowhead that's just a simple straight-up-pointing
+     * triangle attached to the ring's side (see [ARROW_ATTACH_DEGREES]) -
+     * not tangent to the ring at all, which is what makes the reference
+     * read as a clean, recognizable icon rather than the previous
+     * attempts' more organic swoosh. Built entirely from filled triangles,
+     * same as every other debug-grade icon on this screen: the ring is a
+     * strip of small quads (two triangles each) following the (near-full)
+     * circle from [RING_GAP_END_DEGREES] around to [RING_GAP_START_DEGREES],
+     * and the arrowhead is one more triangle, pointing straight up
+     * (screen-space +Y, not tangent) from its attach point on the ring.
+     *
+     * The right/clockwise icon mirrors every one of the left/counter-
+     * clockwise icon's reference angles across the vertical axis (angle ->
+     * 180 - angle) - same mirrored-pair approach every earlier version of
+     * this icon used, so the two buttons stay true mirror images of each
+     * other.
      */
     private fun drawRotationArrowIcon(rect: Rectangle, clockwise: Boolean) {
         val centerX = rect.x + rect.width / 2f
         val centerY = rect.y + rect.height / 2f
-        val outerRadius = rect.width * ARROW_OUTER_RADIUS_FRACTION
-        val thickness = rect.width * ARROW_RING_THICKNESS_FRACTION
-        val innerRadius = outerRadius - thickness
-        val startAngle = ARC_START_DEGREES + if (clockwise) -ARC_ROTATION_DEGREES else ARC_ROTATION_DEGREES
-        val sweep = if (clockwise) -ARC_SWEEP_DEGREES else ARC_SWEEP_DEGREES
-        val step = sweep / ARC_SEGMENTS
+        val midRadius = rect.width * RING_MID_RADIUS_FRACTION
+        val thickness = rect.width * RING_THICKNESS_FRACTION
+        val outerRadius = midRadius + thickness / 2f
+        val innerRadius = midRadius - thickness / 2f
+
+        val gapStart = if (clockwise) 180f - RING_GAP_END_DEGREES else RING_GAP_START_DEGREES
+        val gapEnd = if (clockwise) 180f - RING_GAP_START_DEGREES else RING_GAP_END_DEGREES
+        val attachAngle = if (clockwise) 180f - ARROW_ATTACH_DEGREES else ARROW_ATTACH_DEGREES
+        val sweep = 360f - (gapEnd - gapStart)
+        val step = sweep / RING_SEGMENTS
 
         // HUD_ICON_COLOR's alpha < 1 needs GL blending on to actually read
         // as transparent - see renderDebugMenu's matching comment.
@@ -3591,11 +3627,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
         shapeRenderer.color = HUD_ICON_COLOR
 
-        // The ring itself - one filled quad (as two triangles) per angular
-        // step, between the inner and outer radius.
-        for (i in 0 until ARC_SEGMENTS) {
-            val a0 = startAngle + step * i
-            val a1 = startAngle + step * (i + 1)
+        // The ring - one filled quad (as two triangles) per angular step,
+        // between the inner and outer radius, starting right after the
+        // gap and sweeping the long way around back to the gap's other
+        // edge (leaving only the gap itself undrawn).
+        for (i in 0 until RING_SEGMENTS) {
+            val a0 = gapEnd + step * i
+            val a1 = gapEnd + step * (i + 1)
             val ox0 = centerX + outerRadius * MathUtils.cosDeg(a0)
             val oy0 = centerY + outerRadius * MathUtils.sinDeg(a0)
             val ix0 = centerX + innerRadius * MathUtils.cosDeg(a0)
@@ -3608,25 +3646,19 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
             shapeRenderer.triangle(ix0, iy0, ix1, iy1, ox1, oy1)
         }
 
-        // Arrowhead at the sweep's open end, pointing further along the
-        // ring in the direction of travel (tangent to the ring there -
-        // perpendicular to the radius, signed by which way the sweep went).
-        val endAngle = startAngle + sweep
-        val tangentAngle = endAngle + if (clockwise) -90f else 90f
-        val midRadius = (outerRadius + innerRadius) / 2f
-        val baseX = centerX + midRadius * MathUtils.cosDeg(endAngle)
-        val baseY = centerY + midRadius * MathUtils.sinDeg(endAngle)
-        val headLength = thickness * ARROWHEAD_LENGTH_FACTOR
-        val headHalfWidth = thickness * ARROWHEAD_HALF_WIDTH_FACTOR
-        val tipX = baseX + headLength * 0.5f * MathUtils.cosDeg(tangentAngle)
-        val tipY = baseY + headLength * 0.5f * MathUtils.sinDeg(tangentAngle)
-        val backX = baseX - headLength * 0.5f * MathUtils.cosDeg(tangentAngle)
-        val backY = baseY - headLength * 0.5f * MathUtils.sinDeg(tangentAngle)
-        val leftX = backX + headHalfWidth * MathUtils.cosDeg(tangentAngle + 90f)
-        val leftY = backY + headHalfWidth * MathUtils.sinDeg(tangentAngle + 90f)
-        val rightX = backX + headHalfWidth * MathUtils.cosDeg(tangentAngle - 90f)
-        val rightY = backY + headHalfWidth * MathUtils.sinDeg(tangentAngle - 90f)
-        shapeRenderer.triangle(tipX, tipY, leftX, leftY, rightX, rightY)
+        // The arrowhead - a simple straight-up triangle attached at
+        // attachAngle on the ring, its base extended slightly past the
+        // ring's own centerline so the two blend without a seam.
+        val attachX = centerX + midRadius * MathUtils.cosDeg(attachAngle)
+        val attachY = centerY + midRadius * MathUtils.sinDeg(attachAngle)
+        val baseWidth = thickness * ARROW_BASE_WIDTH_FACTOR
+        val height = thickness * ARROW_HEIGHT_FACTOR
+        val baseEdgeY = attachY - thickness * ARROW_BASE_OVERLAP_FACTOR
+        val tipX = attachX
+        val tipY = attachY + height
+        val leftX = attachX - baseWidth / 2f
+        val rightX = attachX + baseWidth / 2f
+        shapeRenderer.triangle(tipX, tipY, leftX, baseEdgeY, rightX, baseEdgeY)
 
         shapeRenderer.end()
         Gdx.gl.glDisable(GL20.GL_BLEND)
