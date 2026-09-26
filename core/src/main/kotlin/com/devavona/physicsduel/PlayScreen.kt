@@ -437,6 +437,20 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // anything else in the scene.
         private const val AIM_PREVIEW_INVALID_MAX_DISTANCE = 3f
 
+        // Sept 2026 session - drawRotationArrowIcon's shape (see that
+        // function's doc comment). Fractions are of the button rect's own
+        // width, so the icon scales with the button instead of needing its
+        // own HudFont.scaled() reference-pixel constant. Tuned by eye, same
+        // "debug-grade, not final art" spirit as every other button on this
+        // screen - see renderMovementControls' doc comment.
+        private const val ARROW_OUTER_RADIUS_FRACTION = 0.32f
+        private const val ARROW_RING_THICKNESS_FRACTION = 0.10f
+        private const val ARC_START_DEGREES = 90f
+        private const val ARC_SWEEP_DEGREES = 260f
+        private const val ARC_SEGMENTS = 20
+        private const val ARROWHEAD_LENGTH_FACTOR = 2.6f
+        private const val ARROWHEAD_HALF_WIDTH_FACTOR = 1.7f
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -3496,18 +3510,84 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         hudBatch.begin()
         buttonPatch.draw(hudBatch, leftRect.x, leftRect.y, leftRect.width, leftRect.height)
         buttonPatch.draw(hudBatch, rightRect.x, rightRect.y, rightRect.width, rightRect.height)
-        drawCenteredLabel("<", leftRect)
-        drawCenteredLabel(">", rightRect)
         hudBatch.end()
+
+        // Sept 2026 session - Boo wanted the actual rotation direction
+        // shown instead of plain "<"/">" characters. Left increases
+        // angleDegrees (counter-clockwise, standard unit-circle convention
+        // - see AvatarMovementController.position's cos/sin formula);
+        // right decreases it (clockwise). Drawn as real shapes, not font
+        // glyphs - HudFont's plain BitmapFont has no clockwise/counter-
+        // clockwise arrow character to draw, same reasoning
+        // DebugMenuController's hamburger icon already uses shapeRenderer
+        // bars instead of a text glyph.
+        drawRotationArrowIcon(leftRect, clockwise = false)
+        drawRotationArrowIcon(rightRect, clockwise = true)
     }
 
-    /** Centers [label] inside [rect] - shared by every button label this screen draws. */
-    private fun drawCenteredLabel(label: String, rect: Rectangle) {
-        HudFont.font.draw(
-            hudBatch, label,
-            rect.x + (rect.width - HudFont.widthOf(label)) / 2f,
-            rect.y + rect.height * 0.65f
-        )
+    /**
+     * Draws a circular rotation-arrow icon (a ring-shaped arc plus a
+     * triangular arrowhead at its open end) centered inside [rect],
+     * curving clockwise or counter-clockwise per [clockwise] - see
+     * [renderMovementControls]'s call site for which direction each
+     * movement button actually is. Built entirely from filled triangles:
+     * the ring is a strip of small quads (two triangles each) following
+     * the arc from [ARC_START_DEGREES] around by [ARC_SWEEP_DEGREES]
+     * (negated for the clockwise direction), and the arrowhead is one more
+     * triangle at the open end, pointing tangent to the ring in the
+     * direction of travel.
+     */
+    private fun drawRotationArrowIcon(rect: Rectangle, clockwise: Boolean) {
+        val centerX = rect.x + rect.width / 2f
+        val centerY = rect.y + rect.height / 2f
+        val outerRadius = rect.width * ARROW_OUTER_RADIUS_FRACTION
+        val thickness = rect.width * ARROW_RING_THICKNESS_FRACTION
+        val innerRadius = outerRadius - thickness
+        val sweep = if (clockwise) -ARC_SWEEP_DEGREES else ARC_SWEEP_DEGREES
+        val step = sweep / ARC_SEGMENTS
+
+        shapeRenderer.projectionMatrix = hudCamera.combined
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
+        shapeRenderer.color = Color.WHITE
+
+        // The ring itself - one filled quad (as two triangles) per angular
+        // step, between the inner and outer radius.
+        for (i in 0 until ARC_SEGMENTS) {
+            val a0 = ARC_START_DEGREES + step * i
+            val a1 = ARC_START_DEGREES + step * (i + 1)
+            val ox0 = centerX + outerRadius * MathUtils.cosDeg(a0)
+            val oy0 = centerY + outerRadius * MathUtils.sinDeg(a0)
+            val ix0 = centerX + innerRadius * MathUtils.cosDeg(a0)
+            val iy0 = centerY + innerRadius * MathUtils.sinDeg(a0)
+            val ox1 = centerX + outerRadius * MathUtils.cosDeg(a1)
+            val oy1 = centerY + outerRadius * MathUtils.sinDeg(a1)
+            val ix1 = centerX + innerRadius * MathUtils.cosDeg(a1)
+            val iy1 = centerY + innerRadius * MathUtils.sinDeg(a1)
+            shapeRenderer.triangle(ox0, oy0, ix0, iy0, ox1, oy1)
+            shapeRenderer.triangle(ix0, iy0, ix1, iy1, ox1, oy1)
+        }
+
+        // Arrowhead at the sweep's open end, pointing further along the
+        // ring in the direction of travel (tangent to the ring there -
+        // perpendicular to the radius, signed by which way the sweep went).
+        val endAngle = ARC_START_DEGREES + sweep
+        val tangentAngle = endAngle + if (clockwise) -90f else 90f
+        val midRadius = (outerRadius + innerRadius) / 2f
+        val baseX = centerX + midRadius * MathUtils.cosDeg(endAngle)
+        val baseY = centerY + midRadius * MathUtils.sinDeg(endAngle)
+        val headLength = thickness * ARROWHEAD_LENGTH_FACTOR
+        val headHalfWidth = thickness * ARROWHEAD_HALF_WIDTH_FACTOR
+        val tipX = baseX + headLength * 0.5f * MathUtils.cosDeg(tangentAngle)
+        val tipY = baseY + headLength * 0.5f * MathUtils.sinDeg(tangentAngle)
+        val backX = baseX - headLength * 0.5f * MathUtils.cosDeg(tangentAngle)
+        val backY = baseY - headLength * 0.5f * MathUtils.sinDeg(tangentAngle)
+        val leftX = backX + headHalfWidth * MathUtils.cosDeg(tangentAngle + 90f)
+        val leftY = backY + headHalfWidth * MathUtils.sinDeg(tangentAngle + 90f)
+        val rightX = backX + headHalfWidth * MathUtils.cosDeg(tangentAngle - 90f)
+        val rightY = backY + headHalfWidth * MathUtils.sinDeg(tangentAngle - 90f)
+        shapeRenderer.triangle(tipX, tipY, leftX, leftY, rightX, rightY)
+
+        shapeRenderer.end()
     }
 
     /**

@@ -58,9 +58,9 @@ class AvatarMovementController(
     companion object {
         private const val BUTTON_SIZE_REFERENCE_PX = 160f
 
-        // Bumped from an original 16f: at that distance the left ("<") move
-        // button sat inside Android's left-edge back-gesture zone, which
-        // swallows touches there before the app ever sees them - confirmed
+        // Bumped from an original 16f: at that distance the left (counter-
+        // clockwise) move button sat inside Android's left-edge back-gesture
+        // zone, which swallows touches there before the app ever sees them - confirmed
         // on-device (the left button did nothing, the right one - already
         // ~190px further from the edge - worked fine). This clears that
         // zone with margin to spare (140px is well past the typical ~24dp
@@ -98,14 +98,14 @@ class AvatarMovementController(
             )
         }
 
-    /** Bottom-left corner: "<" move button (increases [angleDegrees]). */
+    /** Bottom-left corner: counter-clockwise move button (increases [angleDegrees]). */
     val leftButtonRect: Rectangle
         get() {
             val size = buttonSize
             return Rectangle(margin, margin, size, size)
         }
 
-    /** Immediately right of [leftButtonRect]: ">" move button (decreases [angleDegrees]). */
+    /** Immediately right of [leftButtonRect]: clockwise move button (decreases [angleDegrees]). */
     val rightButtonRect: Rectangle
         get() {
             val size = buttonSize
