@@ -38,8 +38,9 @@ class OrbitalDriftDebugController(private val orbitalDriftTuning: OrbitalDriftTu
         private const val ROW_GAP_REFERENCE_PX = 16f
 
         // Sept 2026 session - see GravityDebugController's own constant of
-        // the same name.
-        private const val HAMBURGER_RESERVE_REFERENCE_PX = 176f
+        // the same name. Halved later the same session along with the icon
+        // itself.
+        private const val HAMBURGER_RESERVE_REFERENCE_PX = 96f
     }
 
     private val buttonSize get() = HudFont.scaled(BUTTON_SIZE_REFERENCE_PX)

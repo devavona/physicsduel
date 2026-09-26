@@ -451,6 +451,29 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         private const val ARROWHEAD_LENGTH_FACTOR = 2.6f
         private const val ARROWHEAD_HALF_WIDTH_FACTOR = 1.7f
 
+        // Sept 2026 session, same-session follow-up: Boo, on-device
+        // screenshot with a hand-drawn overlay - the icons drawn dead-
+        // centered on ARC_START_DEGREES (90, straight up) read as too
+        // symmetric/upright compared to the diagonal, swooping curve he
+        // sketched. This rotates each icon's start point away from center-
+        // top by this many degrees - left (counter-clockwise) rotates
+        // toward upper-LEFT, right (clockwise) rotates toward upper-RIGHT,
+        // a mirror-image pair exactly like the un-rotated version (see
+        // drawRotationArrowIcon's use of it) - just tilted outward instead
+        // of both starting from the same top-center point. Tune this one
+        // constant up or down if the angle still isn't quite right; it's
+        // the single knob for "how tilted."
+        private const val ARC_ROTATION_DEGREES = 50f
+
+        // Sept 2026 session, same-session follow-up: Boo, on-device - the
+        // rotation-arrow icons and the hamburger icon (drawn in
+        // renderDebugMenu) were "too bright and distract" at plain
+        // Color.WHITE. A softened, partly-transparent gray reads as a
+        // quieter, more standard "icon" tone against buttonPatch's dark
+        // background without losing legibility. Not `const` - [Color] isn't
+        // a compile-time constant type.
+        private val HUD_ICON_COLOR = Color(0.8f, 0.8f, 0.85f, 0.65f)
+
         // Phase 13 - illustrative, not tuned. AVATAR_RADIUS reuses
         // LAUNCH_MARKER_RADIUS's value on purpose, so the avatar's actual
         // hitbox matches the size of the cyan marker circle Boo already
@@ -3313,9 +3336,18 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // LibGDX's default BitmapFont's character set isn't guaranteed to
         // include a hamburger-style Unicode glyph, but a filled rect always
         // renders identically everywhere.
+        //
+        // Sept 2026 session follow-up: HUD_ICON_COLOR's alpha < 1 only
+        // actually shows up as transparency with GL blending turned on -
+        // ShapeRenderer doesn't enable it itself, and nothing else in this
+        // file needs it (every other shapeRenderer draw uses fully opaque
+        // colors), so it's switched on right around this draw and back off
+        // immediately after instead of left on globally.
+        Gdx.gl.glEnable(GL20.GL_BLEND)
+        Gdx.gl.glBlendFunc(GL20.GL_SRC_ALPHA, GL20.GL_ONE_MINUS_SRC_ALPHA)
         shapeRenderer.projectionMatrix = hudCamera.combined
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color.WHITE
+        shapeRenderer.color = HUD_ICON_COLOR
         val barHeight = iconRect.height * 0.12f
         val barWidth = iconRect.width * 0.6f
         val barX = iconRect.x + (iconRect.width - barWidth) / 2f
@@ -3325,6 +3357,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         shapeRenderer.rect(barX, centerY - barHeight / 2f + barGap, barWidth, barHeight)
         shapeRenderer.rect(barX, centerY - barHeight / 2f - barGap, barWidth, barHeight)
         shapeRenderer.end()
+        Gdx.gl.glDisable(GL20.GL_BLEND)
 
         if (debugMenuController.isOpen) {
             renderGravityDebugControls()
@@ -3532,10 +3565,13 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
      * [renderMovementControls]'s call site for which direction each
      * movement button actually is. Built entirely from filled triangles:
      * the ring is a strip of small quads (two triangles each) following
-     * the arc from [ARC_START_DEGREES] around by [ARC_SWEEP_DEGREES]
-     * (negated for the clockwise direction), and the arrowhead is one more
-     * triangle at the open end, pointing tangent to the ring in the
-     * direction of travel.
+     * the arc from [startAngle] around by [ARC_SWEEP_DEGREES] (negated for
+     * the clockwise direction), and the arrowhead is one more triangle at
+     * the open end, pointing tangent to the ring in the direction of
+     * travel. [startAngle] is [ARC_START_DEGREES] (top-center) rotated
+     * outward by [ARC_ROTATION_DEGREES] - left tilts toward upper-left,
+     * right tilts toward upper-right, a mirror-image pair either way (see
+     * that constant's own doc comment for why).
      */
     private fun drawRotationArrowIcon(rect: Rectangle, clockwise: Boolean) {
         val centerX = rect.x + rect.width / 2f
@@ -3543,18 +3579,23 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         val outerRadius = rect.width * ARROW_OUTER_RADIUS_FRACTION
         val thickness = rect.width * ARROW_RING_THICKNESS_FRACTION
         val innerRadius = outerRadius - thickness
+        val startAngle = ARC_START_DEGREES + if (clockwise) -ARC_ROTATION_DEGREES else ARC_ROTATION_DEGREES
         val sweep = if (clockwise) -ARC_SWEEP_DEGREES else ARC_SWEEP_DEGREES
         val step = sweep / ARC_SEGMENTS
 
+        // HUD_ICON_COLOR's alpha < 1 needs GL blending on to actually read
+        // as transparent - see renderDebugMenu's matching comment.
+        Gdx.gl.glEnable(GL20.GL_BLEND)
+        Gdx.gl.glBlendFunc(GL20.GL_SRC_ALPHA, GL20.GL_ONE_MINUS_SRC_ALPHA)
         shapeRenderer.projectionMatrix = hudCamera.combined
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
-        shapeRenderer.color = Color.WHITE
+        shapeRenderer.color = HUD_ICON_COLOR
 
         // The ring itself - one filled quad (as two triangles) per angular
         // step, between the inner and outer radius.
         for (i in 0 until ARC_SEGMENTS) {
-            val a0 = ARC_START_DEGREES + step * i
-            val a1 = ARC_START_DEGREES + step * (i + 1)
+            val a0 = startAngle + step * i
+            val a1 = startAngle + step * (i + 1)
             val ox0 = centerX + outerRadius * MathUtils.cosDeg(a0)
             val oy0 = centerY + outerRadius * MathUtils.sinDeg(a0)
             val ix0 = centerX + innerRadius * MathUtils.cosDeg(a0)
@@ -3570,7 +3611,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         // Arrowhead at the sweep's open end, pointing further along the
         // ring in the direction of travel (tangent to the ring there -
         // perpendicular to the radius, signed by which way the sweep went).
-        val endAngle = ARC_START_DEGREES + sweep
+        val endAngle = startAngle + sweep
         val tangentAngle = endAngle + if (clockwise) -90f else 90f
         val midRadius = (outerRadius + innerRadius) / 2f
         val baseX = centerX + midRadius * MathUtils.cosDeg(endAngle)
@@ -3588,6 +3629,7 @@ class PlayScreen(private val game: PhysicsDuelGame) : Screen {
         shapeRenderer.triangle(tipX, tipY, leftX, leftY, rightX, rightY)
 
         shapeRenderer.end()
+        Gdx.gl.glDisable(GL20.GL_BLEND)
     }
 
     /**

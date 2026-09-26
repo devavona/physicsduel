@@ -48,11 +48,13 @@ class GravityDebugController(private val gravitySystem: GravitySystem) : InputAd
         private const val LABEL_RESERVE_REFERENCE_PX = 70f
 
         // Sept 2026 session - DebugMenuController's hamburger icon now sits
-        // above this (the topmost) row - its own icon size (160) plus one
-        // row gap (16) worth of clearance, matching the same "button size +
-        // gap" shape every stacked row below this one already uses. See
-        // that class's own doc comment.
-        private const val HAMBURGER_RESERVE_REFERENCE_PX = 176f
+        // above this (the topmost) row - its own icon size (originally 160,
+        // halved to 80 later the same session - see that class's own
+        // ICON_SIZE_REFERENCE_PX comment) plus one row gap (16) worth of
+        // clearance, matching the same "button size + gap" shape every
+        // stacked row below this one already uses. See that class's own
+        // doc comment.
+        private const val HAMBURGER_RESERVE_REFERENCE_PX = 96f
     }
 
     private val buttonSize get() = HudFont.scaled(BUTTON_SIZE_REFERENCE_PX)

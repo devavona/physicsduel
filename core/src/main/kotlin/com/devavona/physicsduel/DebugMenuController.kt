@@ -30,7 +30,15 @@ import com.badlogic.gdx.math.Rectangle
 class DebugMenuController(private val wrapped: List<InputAdapter>) : InputAdapter() {
 
     companion object {
-        private const val ICON_SIZE_REFERENCE_PX = 160f
+        // Halved from an original 160f (Sept 2026 session, same session as
+        // the icon's own creation) - Boo, on-device, found the icon itself
+        // too large relative to the space it was meant to be freeing up.
+        // See the matching HAMBURGER_RESERVE_REFERENCE_PX halving in the
+        // four wrapped controllers below - that constant tracks this one's
+        // "icon size + gap" total so the topmost row keeps starting exactly
+        // below the icon instead of leaving a stale gap sized for the old,
+        // larger icon.
+        private const val ICON_SIZE_REFERENCE_PX = 80f
         private const val MARGIN_REFERENCE_PX = 16f
     }
 
